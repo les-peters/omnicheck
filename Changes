@@ -1,0 +1,6 @@
+Revision history for Perl extension Omnicheck.
+
+0.01  Wed Apr  1 11:17:22 2015
+	- original version; created by h2xs 1.23 with options
+		-XAn Omnicheck
+

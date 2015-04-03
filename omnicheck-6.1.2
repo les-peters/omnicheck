@@ -1,0 +1,3591 @@
+#!/usr/bin/perl
+
+# File: omnicheck
+# Version: 6 release 1 patch 2
+
+# History:
+#     1.0 - 5.26: proprietary versions
+#          6.0.0: open-source version
+#          6.1.0: sync with recent patches in proprietary version
+#          6.1.1: fixed bugs in array/hash tellfile update
+#          6.1.2: extended filename substitution to exec events
+
+use bytes;
+use IO::Socket;
+use Socket;
+use Getopt::Long qw(GetOptions);
+use Sys::Hostname;
+use FileHandle;
+use Time::Local;
+use Fcntl ':flock';    # import LOCK_* constants
+# use Data::Dumper;      # DEV ONLY
+
+my $license = qq{
+
+Copyright (c) 1997-2008 AOL LLC
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without 
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, 
+this list of conditions and the following disclaimer.
+* Redistributions in binary form must reproduce the above copyright 
+notice, this list of conditions and the following disclaimer in the 
+documentation and/or other materials provided with the distribution.
+* Neither the name of the AOL LLC nor the names of its contributors may 
+be used to endorse or promote products derived from this software without 
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS 
+IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, 
+THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR 
+PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR 
+CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, 
+EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR 
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF 
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING 
+NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS 
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+};
+
+#use strict;
+#use warnings;
+
+$|++;
+my $OC_VERSION = "6";
+my $OC_RELEASE = "1";
+my $OC_PATCH   = "2";
+
+my $Revision = "";
+my $RCS_VERSION = "$Revision: 1.6 $$";
+
+my $Config;
+
+sub debug {
+    my ( $block, $lvl, $msg ) = @_;
+
+    $block ||= "main";
+    my $debug = $opt_D || $Config{$block}{'debug'} || 'notice';
+
+    #debug2    deeper stacktrace
+    #debug     for developers benefit
+    #info      possibly of interest during testing
+    #notice    might worth logging in production
+    #warning   problems the application is prepared to handle
+    #error     problems that need fixing
+    #critical  problems that should be tracked down ASAP
+    #alert     trying to explain why lots of users are complaining
+    #emer      [the above levels seem to cover everything]
+
+    my %debug_hash = (
+        'debug2' => 9,
+        'debug'  => 8,
+        'info'   => 7,
+        'notice' => 6,
+        'warn'   => 5,
+        'err'    => 4,
+        'crit'   => 3,
+        'alert'  => 2,
+        'emer'   => 1
+    );
+
+    my $date = sprintf( "%02d/%02d%02d%02d", reverse( (localtime)[ 0 .. 3 ] ) );
+
+    # get subroutine/line where statement occurred
+    my ($sub) = ( caller(1) )[3];
+    $sub =~ s/^main:://x;
+    my ($line) = ( caller(0) )[2];
+
+    # get subroutine/line of call
+    my ($sub2) = ( caller(2) )[3] || "";
+    $sub2 =~ s/^main:://x;
+    my ($line2) = ( caller(1) )[2];
+
+    if ( $debug_hash{$debug} >= $debug_hash{$lvl} ) {
+        if ( $lvl eq "debug2" ) {
+            printf( ERR "%s %s [%s] (%s:%d->%s::%d) %s\n",
+                $date, $lvl, $block, $sub2, $line2, $sub, $line, $msg );
+        }
+        else {
+            printf( ERR "%s %s [%s] (%s::%d) %s\n",
+                $date, $lvl, $block, $sub, $line, $msg );
+        }
+    }
+    return;
+}
+
+sub report {
+    my ( $block, $msg ) = @_;
+
+    my $date = sprintf( "%02d/%02d%02d%02d", reverse( (localtime)[ 0 .. 3 ] ) );
+    my ($line) = ( caller(0) )[2];
+    my ($sub)  = ( caller(1) )[3];
+    $sub =~ s/^main:://x;
+
+    printf( OUT "%s [%s] (%s::%d) %s\n", $date, $block, $sub, $line, $msg );
+    return;
+}
+
+sub version {
+    print "OmniCheck v $OC_VERSION r $OC_RELEASE p $OC_PATCH\n";
+    return;
+}
+
+sub get_fqdn {
+
+    my ( $address, $fqdn );
+
+    if ( defined( $Config{'main'}{'fqdn'} ) ) {
+        &debug( $block, 'debug', "cache: fqdn $Config{'main'}{'fqdn'}" );
+        return $Config{'main'}{'fqdn'};
+    }
+    else {
+
+        # get domain name
+        $address = gethostbyname( $uname[1] );
+        if ( !$address ) {
+            &debug( $block, 'warn', "Couldn't resolve $uname[1]:$!" );
+        }
+        $fqdn = gethostbyaddr( $address, AF_INET );
+        if ( !$fqdn ) {
+            &debug( $block, 'warn', "Couldn't re-resolve $uname[1]:$!" );
+        }
+        $Config{'main'}{'fqdn'} = $fqdn;
+        &debug( $block, 'debug', "fqdn $fqdn" );
+        return $fqdn;
+    }
+}
+
+sub set_socket_timeout {
+    my $block = shift;
+    my $socket_timeout;
+
+    if ($^O eq "nonstopkernel") {
+        $socket_timeout = 0;
+    } else {
+        $socket_timeout = $Config{$block}{'socket-timeout'} || 5;
+    }
+    return $socket_timeout;
+}
+
+# replacing calls to sendmail
+
+sub send_mail {
+
+    ( $block, $rcpt, $subject, $body, $pattern ) = @_;
+    &debug( $block, "debug", "rcpt $rcpt" );
+    my $fqdn = &get_fqdn;
+
+    if ( $Config{$block}{'smtphost'} =~ /sendmail/x ) {
+        &debug( $block, 'notice', "sending mail via local sendmail binary" );
+        my $mail_fh = FileHandle->new();
+        open( $mail_fh, "| $Config{$block}{'smtphost'}" );
+        print $mail_fh "From: $OC_user\n";
+        &debug( $block, 'debug', "From: $OC_user" );
+        print $mail_fh "To: $rcpt\n";
+        &debug( $block, 'debug', "To: $rcpt" );
+        print $mail_fh "Subject: $subject\n\n";
+        &debug( $block, 'debug', "Subject: $subject" );
+        print $mail_fh "Log entries matching pattern /$pattern/\n";
+
+        if ($Config{$block}{'mail_size_limit'} =~ m|(\d+)\s*/\s*(\d+)|) {
+            my $mail_size_limit    = $1;
+            my $mail_subset_length = $2;
+            if (length(join("\n", @$body)) > $mail_size_limit) {
+                my @body_subset;
+                push @body_subset, "Total message size exceeded limit;";
+                push @body_subset, "Subset of matching lines follow:";
+                for my $index (0 .. $mail_subset_length - 1) {
+                    push @body_subset, $body->[$index];
+                }
+                @$body = @body_subset;
+            }
+        }
+        print $mail_fh join( "\n", @$body ), "\n";
+        for my $line (@$body) {
+            &debug( $block, 'debug', "   $line" );
+        }
+        close($mail_fh);
+    }
+    else {
+        $mail_socket = IO::Socket::INET->new(
+            PeerAddr => $Config{$block}{'smtphost'},
+            PeerPort => 25,
+            Proto    => "tcp",
+            Timeout  => 5,
+            Type     => SOCK_STREAM
+        );
+
+        if ($mail_socket) {
+            &debug( $block, 'notice', "sending mail via sendmail port" );
+            $rc = <$mail_socket>;
+            chomp $rc;
+            $rc =~ s/$//x;
+
+            print $mail_socket "helo $uname[1]\n";
+            $rc = <$mail_socket>;
+            chomp $rc;
+            $rc =~ s/$//x;
+
+            print $mail_socket "mail from: $OC_user\@$fqdn\n";
+            $rc = <$mail_socket>;
+            chomp $rc;
+            $rc =~ s/$//x;
+
+            for $mail_rcpt ( split( /[, ]/, $rcpt ) ) {
+                print $mail_socket "rcpt to: $mail_rcpt\n";
+                $rc = <$mail_socket>;
+                chomp $rc;
+                $rc =~ s/$//x;
+            }
+            print $mail_socket "data\n";
+            $rc = <$mail_socket>;
+            chomp $rc;
+            $rc =~ s/$//x;
+
+            print $mail_socket "Subject: $subject\n\n";
+            print $mail_socket "Log entries matching pattern /$pattern/\n";
+
+            if ($Config{$block}{'mail_size_limit'} =~ m|(\d+)\s*/\s*(\d+)|) {
+                my $mail_size_limit    = $1;
+                my $mail_subset_length = $2; 
+                if (length(join("\n", @$body)) > $mail_size_limit) {
+                    my @body_subset;
+                    push @body_subset, "Total message size exceeded limit;";
+                    push @body_subset, "Subset of matching lines follow:";
+                    for my $index (0 .. $mail_subset_length - 1) {
+                        push @body_subset, $body->[$index];
+                    }
+                    @$body = @body_subset;
+                }
+            }             
+
+            for (@$body) {
+                print $mail_socket "$_\n";
+            }
+            print $mail_socket ".\n";
+            $rc = <$mail_socket>;
+            chomp $rc;
+            $rc =~ s/$//x;
+
+            print $mail_socket "quit\n";
+            $rc = <$mail_socket>;
+            chomp $rc;
+            $rc =~ s/$//x;
+
+            close $mail_socket;
+        }
+        else {
+            my $msg = "could not connect to $Config{$block}{'smtphost'} ";
+            $msg .= "on port 25 ... mail not sent";
+            &debug( $block, 'err', $msg );
+        }
+    }
+    return;
+}
+
+sub leap {
+
+    # get input
+    my ($year) = shift;
+
+    # return variable
+    my $Leap;
+
+    if ( exists( $Config{'main'}{'_leap'} ) ) {
+        &debug( $block, 'debug', "cached " . $Config{'main'}{'_leap'} );
+        return $Config{'main'}{'_leap'};
+    }
+
+    # compute leapyear
+    my $Year = $year + 1900;
+    $Leap = 1 if ( $Year % 4   ) == 0;
+    $Leap = 0 if ( $Year % 100 ) == 0;
+    $Leap = 1 if ( $Year % 400 ) == 0;
+
+    &debug( $block, 'debug', "leap $Config{'main'}{'_leap'}" );
+
+    # store in cache
+    $Config{'main'}{'_leap'} = $Leap;
+    return $Leap;
+}
+
+sub help {
+    print "OmniCheck usage:\n\n";
+    print qq(-B/--block                    which config block to use\n);
+    print qq(-D/--debug                    debug level\n);
+    print qq(-F/--config-file config.file  OmniCheck configuration file\n);
+    print qq(-H/--help                     this help\n);
+    print qq(-I/--init                     initialize OmniCheck\n);
+    print qq(-P/--persistent               make OmniCheck persistent\n);
+    print qq(-T/--test                     simulates actions on log data\n);
+    print qq(-V/--version                  print OmniCheck version\n);
+    print qq(-Z/--zero                     'zero' the tellfile\n);
+    print qq(--re_init                     re-initialize OmniCheck\n);
+    print qq(--rule_analyze                test rules for overlap\n);
+    return;
+}
+
+sub rule_analyze {
+    my $block = shift;
+
+    @rulefiles = split( /\s+/, $Config{$block}{'rules'} );
+    undef @Rules;
+    for $rulefile (@rulefiles) {
+
+        if ( $rulefile =~ m|^/| ) {
+            &debug( $block, 'debug', "about to parse $rulefile" );
+            &parse_rules("$rulefile");
+        }
+        else {
+            &debug( $block, 'debug',
+                "about to parse $Config{$block}{'home'}${dir_sep}$rulefile" );
+            &parse_rules("$Config{$block}{'home'}${dir_sep}$rulefile");
+        }
+    }
+
+    # walk through rules
+    $conflict_flag = 0;
+    &report( $block, "Pattern overlap analysis" );
+    for $o_idx ( 0 .. $#Rules - 1 ) {
+        $curr_pattern = $Rules[$o_idx]->{pattern};
+        $curr_pattern =~ s/^\d{8}##//x;
+        if ( &pattern_check($curr_pattern) ) {
+            &report( $block, "Corrupt pattern: /$curr_pattern/" );
+        }
+        else {
+            for $i_idx ( $o_idx + 1 .. $#Rules ) {
+                $next_pattern = $Rules[$i_idx]->{pattern};
+                $next_pattern =~ s/^\d{8}##//x;
+                if ( $next_pattern =~ /$curr_pattern/ ) {
+                    $conflict_flag++;
+                    &report( $block, "Conflict: /$curr_pattern/" );
+                    &report( $block, "  pre-empts /$next_pattern/" );
+                }
+            }
+        }
+    }
+    if ( !$conflict_flag ) {
+        &report( $block, "No pattern conflicts detected" );
+    }
+    return;
+}
+
+# sub parse_rule: parse rule into arrays
+sub parse_rules {
+
+    my ($file) = shift;
+    &debug( $block, 'debug', "rulefile $file" );
+    my $mtime = ( stat($file) )[9];
+    my $mtime_test = $MTime{$file} || 0;
+    if ( $mtime > $mtime_test ) {
+
+        # re-read file
+        $MTime{$file} = $mtime;
+        delete $Stored_rules{$file};
+        if ( !open( R, $file ) ) {
+            &debug( $block, 'warn', "cannot open rulefile $file: $!" );
+            return;
+        }
+        ( $source = $file ) =~ s|^.*/||x;
+        my $state = 0;
+        while (<R>) {
+            s/^\s+//x;
+            s/\s+$//x;
+            chomp;
+            next if /^#/;
+            if ( $state == 0 ) {
+                next if /^\s*$/x;
+                $ref            = {};
+                $ref->{pattern} = $_;
+                $ref->{source}  = $source;
+                $state++;
+                &debug( $block, 'debug', "found new rule" );
+                &debug( $block, 'debug', "pattern /$_/" );
+                next;
+            }
+
+            if ( $state == 1 && /^(&&|\.\.\.|\+\d+) / ) {
+                $ref->{pattern} .= " $_";
+
+                &debug($block,'info', "ext_pattern /$_/");
+                next;
+            }
+            if ( $state == 1 && /^\|\| / ) {
+                s/^\|\|\ //;
+                $ref->{pattern} .= "|$_";
+
+                &debug($block,'info', "ext_pattern /$_/");
+                next;
+            }
+
+            if ( $state == 1 && /^$/ ) {
+                push @{ $Stored_rules{$file} }, $ref;
+
+                &debug($block,'info', "rule complete");
+                $state = 0;
+                next;
+            }
+
+            if ( $state == 1 ) {
+                if ( !/;/ ) {
+                    if (/(^|\s)(modify|file|exec)/) {
+
+                        # file, exec methods
+                        push @{ $ref->{actions} }, $_;
+
+                        #&debug($block,'info', "action $_");
+                        next;
+                    }
+                }
+                else {
+                    push @{ $ref->{actions} }, $_;
+                    &debug( $block, 'debug', "action $_" );
+                    next;
+                }
+            }
+
+        }
+        close(R);
+        if ( $state == 1 ) {
+            push @{ $Stored_rules{$file} }, $ref;
+
+            #&debug($block,'info', "rule complete");
+        }
+        undef $ref;
+    }
+
+    # internal data is current
+    for $rule ( @{ $Stored_rules{$file} } ) {
+        push @Rules, $rule;
+    }
+    return;
+}
+
+sub mod_rcpt {
+    my ( $rcpt, $call ) = @_;
+    &debug( $block, 'debug', "rcpt in $rcpt call $call" );
+    my $mod_flag;
+    do {
+        $mod_flag = 0;
+        @rcpts = split( /[,\s]+/, $rcpt );
+        foreach (@rcpts) {
+            if (m|([^/]+)/(.+)|) {
+                if ( $call eq "page" ) {
+                    $_ = $1;
+                }
+                elsif ( $call eq "mail" ) {
+                    $_ = $2;
+                }
+            }
+            if (/admin/) {
+                s/admin/$Config{$block}{'admin'}/;
+                $mod_flag = 1;
+            }
+            if (/^oncall$/) {
+                &debug( $block, 'debug', "b $_" );
+                s/^oncall$/$Config{$block}{'oncall'}/;
+                $mod_flag = 1;
+                &debug( $block, 'debug', "a $_" );
+            }
+        }
+        $rcpt = join( ",", @rcpts );
+    } until ( $mod_flag == 0 );
+    &debug( $block, 'debug', "rcpt out $rcpt" );
+    return $rcpt;
+}
+
+# sub mail_poc: replace key phrases with addresses
+sub mail_poc {
+    my $rcpt = shift;
+    my $upd_rcpt;
+    $upd_rcpt = &mod_rcpt( $rcpt, "mail" );
+    &debug( $block, 'debug', "$rcpt -> $upd_rcpt" );
+    return $upd_rcpt;
+}
+
+# sub page_poc: replace key phrases with addresses for paging
+sub page_poc {
+    my $rcpt = shift;
+    my $upd_rcpt;
+    $rcpt = &mod_rcpt( $rcpt, "page" );
+    @rcpts = split( /[,\s]+/, $rcpt );
+    foreach (@rcpts) {
+        s/$/\@$Config{$block}{'pagerhost'}/;
+    }
+    $upd_rcpt = join( ",", @rcpts );
+    &debug( $block, 'debug', "$rcpt -> $upd_rcpt" );
+    return $upd_rcpt;
+}
+
+# read_config:
+#
+# parses the configuration file given with -F
+# retains previous parsed values unless the
+# configuration file or a file that its calls
+# has been modified.  Reparsing will occur
+# whenever a #! is used in the configuration
+
+sub read_config {
+
+    my ($first_time) = shift;
+
+    # %MTime contains the last modification times for all files
+    #    referenced in the configuration
+    # %Glob contains the most recent list of files that
+    #    are referenced by a glob file
+    # @RawConfig contains the list of configuration lines
+    # %RawConfig contains the unprocessed config data
+    # %Config contains the fully processed config data
+
+    my $reparse = 0;
+    if ($first_time) {
+        $reparse++;
+    }
+
+    # test for -F value, crit error if not found
+
+    if ( !$opt_F ) {
+        &debug( $block, 'crit',
+            "OmniCheck cannot run without -F option...exiting" );
+        &close_logs;
+        exit(255);
+    }
+
+    # non-persistent installations always parse the
+    # configuration file
+
+    if ( !$opt_P ) {
+        $reparse++;
+    }
+
+    # check modtimes for all config files
+    # if any have been modified, reparse
+
+    if ( !$reparse ) {
+        for my $file ( keys %MTime ) {
+            $mtime = ( stat($file) )[9];
+            if ( $mtime > $MTime{$file} ) {
+                $reparse++;
+            }
+        }
+    }
+
+    # check for any #! (excluding file)
+    # if any exist, reparse
+
+    if ( !$reparse ) {
+        for my $line (@RawConfig) {
+            if ( $line =~ /#!/ && $line !~ /^file:/ ) {
+                $reparse++;
+            }
+        }
+    }
+
+    # check for updates to globs
+    # if they have been updated, reparse
+
+    if ( !$reparse ) {
+        $updated = 0;
+        for my $glob ( keys %Glob ) {
+            my $tmp = $Glob{$glob};
+            for my $file ( glob($glob) ) {
+                if ( $tmp->{$file} ) {
+                    delete $tmp->{$file};
+                }
+                else {
+                    $updated++;
+                }
+            }
+            if ( scalar keys %$tmp ) {
+                $updated++;
+            }
+        }
+        if ($updated) {
+            $reparse++;
+        }
+    }
+
+    if ($reparse) {
+        $MTime{$opt_F} = ( stat($opt_F) )[9];
+        &debug($block, 'debug', "MTime{opt_F} $MTime{$opt_F}");
+        @RawConfig = ();
+
+        &debug( $block, 'info', "pass 1" );
+        &debug( $block, 'info', "reading config file $opt_F" );
+
+        if ( !open( CFG, "< $opt_F" ) ) {
+            &debug( $block, 'crit',
+                "cannot open configuration file $opt_F: $!" );
+            &close_logs;
+            exit(127);
+        }
+
+        @TMP = <CFG>;
+        close(CFG);
+
+        for (@TMP) {
+            chomp;
+            &debug( $block, 'debug', "read_config:0 $_" );
+        }
+
+        # handle #include's and #!include's
+        for ( 0 .. $#TMP ) {
+            if ( $TMP[$_] =~ /^#include\s+(.*)/ ) {
+                my $include = $1;
+                &debug( $block, 'info', "found #include file $include" );
+                if ( open( IN, "< $include" ) ) {
+                    $MTime{$opt_F} = ( stat($include) )[9];
+                    &debug($block, 'debug', "MTime{opt_F} $MTime{$opt_F}");
+                    push @RawConfig, <IN>;
+                    close(IN);
+                }
+                else {
+                    $msg = "#include failure: cannot read $include ... ignored";
+                    &debug( $block, 'warn', $msg );
+                }
+
+            }
+            elsif ( $TMP[$_] =~ /^#!include\s+(.*)/ ) {
+                my $shebang_include = $1;
+                &debug( $block, 'debug',
+                    "found #!include file $shebang_include" );
+                if ( open( IN, "$shebang_include|" ) ) {
+                    push @RawConfig, <IN>;
+                    close(IN);
+                }
+                else {
+                    $msg = "#!include failure: cannot execute ";
+                    $msg .= "$shebang_include ... ignored";
+                    &debug( $block, 'warn', $msg );
+                }
+            }
+            else {
+                push @RawConfig, $TMP[$_];
+            }
+        }
+        undef @TMP;
+
+        for (@RawConfig) {
+            chomp;
+            &debug( $block, 'debug', "read_config:1 $_" );
+        }
+
+        &debug( $block, 'info', "pass 2" );
+        $block = "main";
+        &debug( $block, 'info', "now configuring block $block" );
+        %RawConfig = ();
+        for (@RawConfig) {
+            next if /^\s*$/;
+            next if /^#/;
+            chomp;
+
+            # trim off comments at end of lines
+            s/\s+#\s+.*$//;
+            if (/^block:\s+(.*)$/) {
+                $block = $1;
+                &debug( $block, 'info', "now configuring block $block" );
+            }
+            else {
+                my ( $name, $value ) = split( /:\s+/, $_, 2 );
+
+                if ( $^O eq "MSWin32" ) {
+                    $value =~ s/ /\\ /g;
+                }
+
+                if ( $name =~ /rules/ ) {
+                    $RawConfig{$block}{$name} .= $value . " ";
+                    $msg = sprintf( "%s:%s now %s",
+                        $block, $name, $RawConfig{$block}{$name} );
+                    &debug( $block, 'info', $msg );
+                }
+                else {
+                    if ( exists( $RawConfig{$block}{$name} ) ) {
+                        $msg = sprintf( "%s:%s %s replaced by %s",
+                            $block, $name, $RawConfig{$block}{$name}, $value );
+                        &debug( $block, 'info', $msg );
+                    }
+                    $RawConfig{$block}{$name} = $value;
+                }
+            }
+        }
+        undef @CFG;
+
+        for my $block ( keys %RawConfig ) {
+            for my $key ( keys %{ $RawConfig{$block} } ) {
+                &debug( $block, 'debug',
+                    "read_config:2 $block $key $RawConfig{$block}{$key}" );
+            }
+        }
+
+        &debug( $block, 'info', "pass 3" );
+        %Config = ();
+        for $block ( keys(%RawConfig) ) {
+            next unless $block;
+            &debug( $block, "debug", "processing config for $block" );
+            for $key ( keys( %{ $RawConfig{$block} } ) ) {
+                undef @r;
+
+                if ( $key =~ /rules/ ) {
+                    $RawConfig{$block}{$key} =~ s/ $//;
+                }
+
+                # Unix wildcards
+                #
+                # file:  /usr/adm/logs/*.log
+                #        /usr/adm/logs/[123].log
+                #        /usr/adm/logs/file???.log
+
+                if ( $key eq "file" ) {
+                    if ( $RawConfig{$block}{$key} =~ /(^|[^\\])[\[*?]/ ) {
+                        &debug( $block, "debug", "glob found" );
+
+                        my @Aref = ();
+                        $Glob{ $RawConfig{$block}{$key} } ||= {};
+                        for $file ( glob $RawConfig{$block}{$key} ) {
+                        &debug( $block, "debug", "globbette $file" );
+                            $Glob{ $RawConfig{$block}{$key} }->{$file}++;
+                            push @Aref, $file;
+                        }
+                        $Config{$block} ||= {};
+                        $Config{$block}{$key} = \@Aref;
+                    } else {
+                        &debug( $block, "debug", "no glob found" );
+                    }
+
+                    # OmniCheck filelist
+                    #
+                    # file:  @filelist
+
+                    if ( $RawConfig{$block}{$key} =~ /^@/ ) {
+                        my %Href;
+                        my $listfile = substr( $RawConfig{$block}{$key}, 1 );
+                        if ( open( R, "< $listfile" ) ) {
+                            $MTime{ $RawConfig{$block}{$key} } =
+                              ( stat($listfile) )[9];
+                            &debug($block, 'debug', "MTime{RawConfig_block_key} $MTime{$RawConfig{$block}{$key}}");
+                            while ( my $line = <R> ) {
+                                chomp $line;
+                                my ( $log_file, $old_file );
+
+                                if ( $line =~ /(^|[^\\])[\[*?]/ ) {
+                                    $Glob{$line} ||= {};
+                                    for $g_file ( glob $line ) {
+                                        $Glob{$line}->{$g_file}++;
+                                        &debug( $block, 'debug',
+"globbing $g_file -> /dev/null into filelist hash"
+                                        );
+                                        $Href{$g_file} = "/dev/null";
+                                    }
+                                }
+                                else {
+
+                                    $line =~ s/^\s+//;
+                                    $line =~ s/\s+$//;
+                                    if ( $line =~ /\t/ ) {
+                                        ( $log_file, $old_file ) =
+                                          split( /\t/, $line );
+                                        &debug( $block, 'debug',
+"keying $log_file -> $old_file into filelist hash"
+                                        );
+                                        $Href{$log_file} = $old_file;
+
+                                    }
+                                    else {
+                                        &debug( $block, 'debug',
+"keying $line -> /dev/null into filelist hash"
+                                        );
+                                        $Href{$line} = "/dev/null";
+                                    }
+                                }
+                            }
+                            close(R);
+                            $Config{$block}{$key} = \%Href;
+                        }
+                        else {
+                            $msg = "$RawConfig{$block}{$key} cannot be read: ";
+                            $msg .= "setting $block:$key to null";
+                            &debug( $block, 'warn', $msg );
+                            $Config{$block}{$key} = "";
+                        }
+                    }
+                }
+
+                # read a file for value
+
+                if ( $key !~ /^(logs|rules|smtphost|file|home|report|tmpdir|gzip)$/
+                    && $RawConfig{$block}{$key} =~ m/^\// )
+                {
+                    if ( open( R, "< $RawConfig{$block}{$key}" ) ) {
+                        $MTime{ $RawConfig{$block}{$key} } =
+                          ( stat( $RawConfig{$block}{$key} ) )[9];
+                            &debug($block, 'debug', "MTime{RawConfig_block_key} $MTime{$RawConfig{$block}{$key}}");
+                        while (<R>) {
+                            chomp;
+                            push @r, $_;
+                        }
+                        close(R);
+                        $Config{$block}{$key} = join( " ", @r );
+                    }
+                    else {
+                        &debug( $block, 'warn',
+"$RawConfig{$block}{$key} cannot be read: setting $block:$key to null"
+                        );
+                        $Config{$block}{$key} = "";
+                    }
+
+                    # run a program/script for a value
+
+                }
+                elsif ($key !~ /^(file|home|logs|tmpdir)/
+                    && $RawConfig{$block}{$key} =~ m/^#!/ )
+                {
+                    $proc = substr( $RawConfig{$block}{$key}, 2 );
+                    ( $bin = $proc ) =~ s/\s+.*$//;
+                    if ( -x $bin ) {
+                        if ( open( R, "$proc|" ) ) {
+                            while (<R>) {
+                                chomp;
+                                push @r, $_;
+                            }
+                            close(R);
+                            $Config{$block}{$key} = join( " ", @r );
+                        }
+                        else {
+                            &debug( $block, 'warn',
+"$proc cannot be executed: setting $block:$key to null"
+                            );
+                            $Config{$block}{$key} = "";
+                        }
+                    }
+                    else {
+                        &debug( $block, 'warn',
+"$bin cannot be executed: setting $block:$key to null"
+                        );
+                        $Config{$block}{$key} = "";
+                    }
+                }
+                else {
+
+                    $Config{$block}{$key} ||= $RawConfig{$block}{$key};
+                }
+
+                # substitute OS and NODE with appropriate values for rules
+
+                if ( $key eq "rules" ) {
+                    $Config{$block}{$key} =~ s/(rules\.)OS\b/$1$uname[0]/g;
+                    $Config{$block}{$key} =~ s/(rules\.)NODE\b/$1$uname[1]/g;
+                }
+
+                if ( $key =~ /fqdn|name|target/ ) {
+                    $Config{$block}{$key} =~ s/NODE/$uname[1]/g;
+                }
+            }
+        }
+    }
+
+    # trickle-down configuration from main to other blocks if not set locally
+
+    &debug( $block, 'info', "pass 4" );
+    for $key ( sort keys( %{ $Config{"main"} } ) ) {
+        for $block ( grep( !/main/, keys(%Config) ) ) {
+            next unless $block;
+            if ( $key =~ /process|home|tmpdir/ ) {
+                $Config{$block}{$key} = $Config{"main"}{$key};
+            }
+            else {
+                $Config{$block}{$key} ||= $Config{"main"}{$key};
+            }
+        }
+    }
+
+    for $block ( keys(%Config) ) {
+        next unless $block;
+
+        for my $flag (qw(production farm maint)) {
+            if ( $Config{$block}{$flag} ) {
+                if ( $Config{$block}{$flag} =~ /1|on|y(es)?/i ) {
+                    $Chkconfig{$block}{$flag} = "on";
+                }
+                else {
+                    $Chkconfig{$block}{$flag} = "off";
+                }
+            }
+        }
+
+        # determine whether to page: default is on
+        $opt_N{$block} = 0;
+
+        # check status of flags
+        if ( $Chkconfig{$block}{'production'} ) {
+            if ( $Chkconfig{$block}{'production'} eq "off" ) {
+                $opt_N{$block} = 1;
+            }
+        }
+        if ( $Chkconfig{$block}{'farm'} ) {
+            if ( $Chkconfig{$block}{'farm'} eq "on" ) {
+                $opt_N{$block} = 1;
+            }
+        }
+    }
+    &debug( $block, 'info', "pass 5" );
+    for $block ( keys(%Config) ) {
+        for my $key ( sort keys %{ $Config{$block} } ) {
+            &debug( $block, "debug", "$block->$key $Config{$block}{$key}" );
+        }
+
+    }
+
+    for $file ( keys(%MTime) ) {
+        $msg =
+          sprintf( "mtime of $file is %s", scalar localtime( $MTime{$file} ) );
+        &debug( $block, "debug", $msg );
+    }
+
+    for $glob ( keys(%Glob) ) {
+        for my $file ( sort keys %{ $Glob{$glob} } ) {
+            $msg = sprintf( "glob %s: %s", $glob, $file );
+            &debug( $block, "debug", $msg );
+        }
+    }
+
+    return;
+}
+
+sub parse_args {
+
+    # determine filesystem analysis program from OS
+    $uname[0] = $^O;
+    $uname[1] = hostname();
+
+    &GetOptions(
+
+        "B|block:s"      => \$opt_B,
+        "D|debug=s"      => \$opt_D,
+        "F|configfile=s" => \$opt_F,
+        "H|help!"        => \$opt_H,
+        "I|init!"        => \$opt_I,
+        "P|persistent!"  => \$opt_P,
+        "T|test!"        => \$opt_T,
+        "V|version!"     => \$opt_V,
+        "rule_analyze!"  => \$opt_R,
+        "re_init!"       => \$opt_re_init,
+        "Z|zero!"        => \$opt_Z,
+    );
+
+    if ($opt_H) { &help;    &close_logs; exit 0; }
+    if ($opt_V) { &version; &close_logs; exit 0; }
+
+    # set testing block to main if unset during testing
+    if ( $opt_T && ! $opt_B ) {
+        $opt_B = "main";
+    }
+
+    if ($opt_R) {
+        &open_logs(0);
+        &read_config;
+        &open_logs(1);
+        for my $block ( keys %Config ) {
+            &rule_analyze($block);
+        }
+        &close_logs;
+        exit 0;
+    }
+
+    if ( $^O ne "MSWin32" ) {
+        $OC_user = scalar getpwuid($<);
+    }
+    else {
+        $OC_user = "omnicheck";
+    }
+    return;
+}
+
+sub set_temp {
+
+    # set tmp directory from config
+    if ( defined $Config{$block}{'tmpdir'} ) {
+        &debug( $block, 'debug', "tmpdir $Config{$block}{'tmpdir'}" );
+        return;
+    }
+
+    # if not set, decide tmp directory based on OS
+    if ( $uname[0] eq "dec_osf" ) {
+        $Config{$block}{'tmpdir'} = "/usr/tmp";
+    }
+    elsif ( $uname[0] eq "irix" ) {
+        $Config{$block}{'tmpdir'} = "/usr/tmp";
+    }
+    elsif ( $uname[0] eq "solaris" ) {
+        $Config{$block}{'tmpdir'} = "/usr/tmp";
+    }
+    elsif ( $uname[0] eq "hpux" ) {
+        $Config{$block}{'tmpdir'} = "/tmp";
+    }
+    elsif ( $uname[0] eq "aix" ) {
+        $Config{$block}{'tmpdir'} = "/usr/tmp";
+    }
+    elsif ( $uname[0] eq "linux" ) {
+        $Config{$block}{'tmpdir'} = "/tmp";
+    }
+    elsif ( $uname[0] eq "MSWin32" ) {
+        if ( -d "C:\\TEMP" ) {
+            $Config{$block}{'tmpdir'} = "C:\\TEMP";
+        }
+        elsif ( -d "C:\\TMP" ) {
+            $Config{$block}{'tmpdir'} = "C:\\TMP";
+        }
+        else {
+            $Config{$block}{'tmpdir'} = "C:";
+        }
+    }
+    else {
+        $Config{$block}{'tmpdir'} = "/usr/tmp";
+    }
+    &debug( $block, 'debug', "tmpdir $Config{$block}{'tmpdir'}" );
+    return;
+}
+
+sub init {
+
+    $tellfile =
+      "$Config{'main'}{'tmpdir'}${dir_sep}$Config{'main'}{'process'}.tell";
+    &debug( $block, 'debug',
+        "$Config{'main'}{'tmpdir'}${dir_sep}$Config{'main'}{'process'}.tell" );
+
+    stat("$tellfile");
+
+    # check tellfile ownership
+    $tell_owner = ( stat($tellfile) )[4];
+    if ( -e _ && $tell_owner != $> ) {
+        &debug( $block, 'crit', "tellfile $tellfile not owned by user" );
+        &close_logs;
+        exit(63);
+    }
+
+    if ( -e _ && !$opt_re_init ) {
+        &debug( $block, 'err', "already initialized: use --re_init" );
+        &close_logs;
+        exit(31);
+    }
+
+    # open current syslog and seek to EOF of monitored file(s)
+    if ( !open( TELL, "> $tellfile" ) ) {
+        &debug( $block, 'err', "cannot open tellfile $tellfile for writing" );
+        &close_logs;
+        exit(15);
+    }
+    &debug( $block, 'debug', "tellfile $tellfile open for writing" );
+
+    # for each block
+    #    determine what file(s) are monitored
+    #    add entries into tellfile for each file
+
+    for $block ( keys %Config ) {
+        next unless $block;
+        if ( ref $Config{$block}{'file'} eq "ARRAY" ) {
+            for $file ( @{ $Config{$block}{'file'} } ) {
+                &debug( $block, 'debug', "initializing $file" );
+                if ( $file =~ /^#!/ ) {
+                    print TELL "${block}\t$file\t0\n";
+                }
+                else {
+                    ($tell) = ( stat($file) )[7];
+                    if ($opt_Z) {
+                        print TELL "${block}\t$file\t0\n";
+                        &debug( $block, 'debug',
+                            "tellfile: $block $file zero" );
+                    }
+                    else {
+                        print TELL "${block}\t$file\t$tell\n";
+                        &debug( $block, 'debug',
+                            "tellfile: $block $file $tell" );
+                    }
+                }
+            }
+        }
+        elsif ( ref $Config{$block}{'file'} eq "HASH" ) {
+            for $file ( keys %{ $Config{$block}{'file'} } ) {
+                if ( $file =~ /^#!/ ) {
+                    print TELL "${block}\t$file\t0\n";
+                }
+                else {
+                    ($tell) = ( stat($file) )[7];
+                    if ($opt_Z) {
+                        print TELL "${block}\t$file\t0\n";
+                        &debug( $block, 'debug',
+                            "tellfile: $block $file zero" );
+                    }
+                    else {
+                        print TELL "${block}\t$file\t$tell\n";
+                        &debug( $block, 'debug',
+                            "tellfile: $block file $file tell $tell" );
+                    }
+                }
+            }
+        }
+        else {
+            if ( $Config{$block}{'file'} =~ /^#!/ ) {
+                print TELL "${block}\t$Config{$block}{'file'}\t0\n";
+                &debug( $block, 'debug', "tellfile: $block $file 0" );
+            }
+            else {
+                ($tell) = ( stat( $Config{$block}{'file'} ) )[7];
+                if ($opt_Z) {
+                    print TELL "${block}\t$Config{$block}{'file'}\t0\n";
+                    &debug( $block, 'debug',
+                        "tellfile: $block $Config{$block}{'file'} zero" );
+                }
+                else {
+                    print TELL "${block}\t$Config{$block}{'file'}\t$tell\n";
+                    &debug( $block, 'debug',
+                        "tellfile: $block $Config{$block}{'file'} $tell" );
+                }
+            }
+        }
+    }
+    close(TELL);
+
+    &report( $block,
+        "OmniCheck initialized for instance $Config{'main'}{'process'}" );
+    return;
+}
+
+my %Tell;
+
+sub get_data {
+
+    my ( $file, $old_file, $newtell_ref ) = @_;
+    &debug( $block, 'debug', "processing file $file" );
+    &debug( $block, 'debug', "old_file '$old_file'" ) if $old_file;
+
+    my @s;
+
+    if ($opt_T) {
+        while (<>) {
+            push( @s, $_ );
+        }
+
+        return \@s;
+    }
+
+    if ( $file =~ /^#!/ ) {
+        $proc = substr( $file, 2 );
+        my $binary_name;
+        ( $binary_name = $proc ) =~ s/\s+.*$//;
+        if ( -x $binary_name ) {
+            if ( open( X, "$proc|" ) ) {
+                while (<X>) {
+                    push( @s, $_ );
+                }
+                close(X);
+            }
+            else {
+                &debug( $block, 'warn',
+                    "cannot run '$proc' to read output:$!" );
+            }
+        }
+        else {
+            &debug( $block, 'warn',
+"cannot run '$proc' to read output as '$binary_name' lacks execute permission"
+            );
+        }
+
+        return \@s;
+    }
+
+    $tellfile =
+      "$Config{'main'}{'tmpdir'}${dir_sep}$Config{'main'}{'process'}.tell";
+    &debug( $block, "debug", "tellfile $tellfile" );
+
+    # open tellfile for read
+    if ( !open( TELL, "< $tellfile" ) ) {
+
+        &debug( $block, 'err',
+            "cannot open tellfile $tellfile for reading... will create and exit"
+        );
+        &init();
+        &close_logs;
+        exit(7);
+    }
+
+
+    if ( -z $tellfile ) {
+        &debug( $block, 'crit',
+"found zero-length tellfile $tellfile ... will re-initialize and exit"
+        );
+        unlink($tellfile);
+        &init();
+        &close_logs;
+        exit 0;
+    }
+
+    @tell = <TELL>;
+    close(TELL);
+
+    my ( $t_main, $t_file, $t_tell );
+    for (@tell) {
+        chomp;
+        next if /^$/;
+        &debug( $block, "debug", "telldata $_" );
+        ( $t_main, $t_file, $t_tell ) = split(/\t/);
+        my $key;
+        $key = $t_main . "__" . $t_file;
+        $Tell{$key} = $t_tell;
+    }
+    $key  = $block . "__" . $file;
+    $tell = $Tell{$key};
+    &debug( $block, "debug", "key $key; tell $tell" );
+
+    # check size of file, read oldfile if able
+    stat($file);
+    $msg = "-s _: " . -s _;
+    &debug( $block, "debug", "size test: $msg < $tell" );
+
+
+    if ( -s _ < $tell ) {
+        &debug( $block, 'debug', "filesize < tell value" );
+        if ($old_file) {
+            &debug( $block, 'debug', "checking oldfile $old_file" );
+            if ( $RawConfig{$block}{'file'} =~ /(^|[^\\])[\[*?]/ ) {
+                &debug( $block, "warn", "cannot use 'oldfile with globs" );
+            }
+            else {
+
+                if ( $old_file =~ /\.gz$/ ) {
+                    my $gzip_pgm = $Config{$block}{'gzip'};
+                    if ( !$gzip_pgm ) {
+                        &debug( $block, 'warn',
+                            "cannot find gzip in configuration" );
+                    }
+                    else {
+                        if ( !-x $gzip_pgm ) {
+                            &debug( $block, 'warn',
+                                "'$gzip_pgm' is not executable" );
+                        }
+                        else {
+                            &debug( $block, "debug",
+                                "processing gzip'd oldfile" );
+                            my $gzip_tell = $tell;
+                            my $null;
+                            my $gzip_fh = FileHandle->new();
+                            open( $gzip_fh, "$gzip_pgm -dc $old_file |" )
+                              or die;
+                            while ( $gzip_tell > 1024 ) {
+                                read( $gzip_fh, $null, 1024 );
+                                $gzip_tell -= 1024;
+                            }
+                            read( $gzip_fh, $null, $gzip_tell );
+
+                            if ( $Config{$block}{'IRS'} ) {
+                                &debug( $block, 'notice',
+"block processing: pattern $Config{$block}{'IRS'}"
+                                );
+
+                                if ( $Config{$block}{'IRS'} =~ /\s+:trim$/ ) {
+                                    my $rec_pattern = $Config{$block}{'IRS'};
+                                    $rec_pattern =~ s/\s+:trim//;
+                                    my $matched_rec_pattern = "";
+                                    my $record              = "";
+                                    while ( defined( $line = <$gzip_fh> ) ) {
+                                        chomp $line;
+                                        if ( $line =~ /($rec_pattern)/ ) {
+                                            $new_rec_pattern = $1;
+                                            if ( $matched_rec_pattern ne
+                                                $new_rec_pattern )
+                                            {
+
+                                                # new line
+                                                push @s, $record
+                                                  unless !$matched_rec_pattern;
+                                                $record = $line;
+                                            }
+                                            else {
+
+                                                # continuation
+                                                ( $next = $line ) =~
+                                                  s/$matched_rec_pattern//;
+                                                $record .= $next;
+                                            }
+                                            $matched_rec_pattern =
+                                              $new_rec_pattern;
+                                        }
+                                        else {
+                                            &debug( $block, 'warn',
+"should never be here - $line !~ /$rec_pattern/\n"
+                                            );
+                                        }
+                                    }
+                                    push @s, $record;
+
+                                }
+                                else {
+                                    my $rec_pattern = $Config{$block}{'IRS'};
+                                    $record = "";
+                                    while ( defined( $line = <$gzip_fh> ) ) {
+                                        if ( $line =~ /$rec_pattern/ ) {
+                                            push @s, $record if $record;
+                                            $record = $line;
+                                        }
+                                        else {
+                                            $record .= $line;
+                                        }
+                                    }
+                                    push @s, $record if $record;
+                                }
+                            }
+                            else {
+                                while (<$gzip_fh>) {
+                                    chomp;
+                                    push @s, $_;
+                                }
+                            }
+                            close($gzip_fh);
+                        }
+
+                    }
+
+                    # access config to get location of gzip
+                    # if not there, error
+                    # if there, uncompress file inline, seek and read data
+                    #
+                    # add compress(.Z) and zipped (.ZIP)
+
+                }
+                else {
+                    if ( !open( S, "< $old_file" ) ) {
+                        &debug( $block, 'warn',
+                            "cannot open oldfile $old_file" );
+                    }
+                    else {
+                        &debug( $block, "debug", "processing oldfile" );
+                        seek( S, $tell, 0 ) if $tell;
+                        while (<S>) {
+                            chomp;
+                            push @s, $_;
+                        }
+                        close(S);
+                    }
+                }
+            }
+        }
+        $tell = 0;
+    }
+
+    # open current file and seek to $tell
+    open( S, "< $file" )
+      || &debug( $block, 'warn', "cannot open monitored file $file: $!" );
+    seek( S, $tell, 0 );
+
+
+    if ( $Config{$block}{'IRS'} ) {
+        &debug( $block, 'notice',
+            "block processing: pattern $Config{$block}{'IRS'}" );
+
+        if ( $Config{$block}{'IRS'} =~ /\s+:trim$/ ) {
+            my $rec_pattern = $Config{$block}{'IRS'};
+            $rec_pattern =~ s/\s+:trim//;
+            my $matched_rec_pattern = "";
+            my $record              = "";
+            while ( defined( $line = <S> ) ) {
+                chomp $line;
+                if ( $line =~ /($rec_pattern)/ ) {
+                    $new_rec_pattern = $1;
+                    if ( $matched_rec_pattern ne $new_rec_pattern ) {
+
+                        # new line
+                        push @s, $record unless !$matched_rec_pattern;
+                        $record = $line;
+                    }
+                    else {
+
+                        # continuation
+                        ( $next = $line ) =~ s/$matched_rec_pattern//;
+                        $record .= $next;
+                    }
+                    $matched_rec_pattern = $new_rec_pattern;
+                }
+                else {
+                    &debug( $block, 'warn',
+                        "should never be here - $line !~ /$rec_pattern/\n" );
+                }
+            }
+            push @s, $record;
+
+        }
+        else {
+            my $rec_pattern = $Config{$block}{'IRS'};
+            $record = "";
+            while ( defined( $line = <S> ) ) {
+                if ( $line =~ /$rec_pattern/ ) {
+                    push @s, $record if $record;
+                    $record = $line;
+                }
+                else {
+                    $record .= $line;
+                }
+            }
+            push @s, $record if $record;
+        }
+    }
+    else {
+        &debug( $block, 'notice', "line processing" );
+        while (<S>) {
+            chomp;
+            push @s, $_;
+        }
+    }
+    $$newtell_ref = tell(S);
+    close(S);
+
+    my ($msg) = sprintf( "%d log entries in %s", scalar @s, $file );
+    &report( $block, $msg );
+    return \@s;
+}
+
+# parse using system, then site rule sets to determine if admin notification
+#   is necessary for events
+
+# read rulesets
+
+sub read_rules {
+    my ($block) = shift;
+    undef @Rules;
+    @rulefiles = split( /\s+/, $Config{$block}{'rules'} );
+    for $rulefile (@rulefiles) {
+        &debug( $block, 'debug', "$rulefile needs parsing" );
+
+        if ( $rulefile =~ m|^/| ) {
+            &debug( $block, 'debug', "about to parse $rulefile" );
+            &parse_rules("$rulefile");
+        }
+        else {
+            &debug( $block, 'debug',
+                "about to parse $Config{$block}{'home'}${dir_sep}$rulefile" );
+            &parse_rules("$Config{$block}{'home'}${dir_sep}$rulefile");
+        }
+    }
+    return;
+}
+
+
+sub modify_event {
+    my ( $pattern, $rcpt, $results ) = @_;
+
+    &debug( $block, 'debug', "modify_event start" );
+    &title_remembrance( \$rcpt, $results->[0], $pattern );
+
+    if ( $rcpt =~ m|--(\w+)\s+"([^"]+)"\s+"([^"]+)"| ) {
+        $opt    = $1;
+        $param1 = $2;
+        $param2 = $3;
+        &debug( $block, 'debug', "option $opt param1 $param1 param2 $param2" );
+    }
+    elsif ( $rcpt =~ m|--(\w+)\s+"([^"]+)"| ) {
+        $opt    = $1;
+        $param1 = $2;
+        &debug( $block, 'debug', "option $opt param1 $param1" );
+    }
+
+    if ( $opt eq "prepend" ) {
+        &debug( $block, 'debug', "prepend-ing" );
+        if ( $param1 !~ /^#!/ ) {
+            for ( 0 .. $#{$results} ) {
+                $msg = "b " . $results->[$_];
+                &debug( $block, 'debug', $msg );
+                $results->[$_] = $param1 . " " . $results->[$_];
+                $msg = "a " . $results->[$_];
+                &debug( $block, 'debug', $msg );
+            }
+        }
+        else {
+            $param1 =~ s/^#!//;
+            ( $exec_file = $param1 ) =~ s/\s.*$//;
+            if ( -x $exec_file ) {
+                if ( open( XOUT, "$param1|" ) ) {
+                    while (<XOUT>) {
+                        $xout = $_;
+                    }
+                    close(XOUT);
+                    chomp $xout;
+                    for ( 0 .. $#{$results} ) {
+                        $msg = "b " . $results->[$_];
+                        &debug( $block, 'debug', $msg );
+                        $results->[$_] = $xout . " " . $results->[$_];
+                        $msg = "a " . $results->[$_];
+                        &debug( $block, 'debug', $msg );
+                    }
+                }
+                else {
+                    &debug( $block, 'warn',
+                        "exec within modify action cannot run $param1" );
+                }
+            }
+            else {
+                &debug( $block, 'warn',
+                    "exec within modify action cannot run $param1" );
+            }
+        }
+
+    }
+    if ( $opt eq "append" ) {
+        if ( $param1 !~ /^#!/ ) {
+            for ( 0 .. $#{$results} ) {
+                $msg = "b " . $results->[$_];
+                &debug( $block, 'debug', $msg );
+                $results->[$_] = $results->[$_] . " " . $param1;
+                $msg = "a " . $results->[$_];
+                &debug( $block, 'debug', $msg );
+            }
+
+        }
+        else {
+            $param1 =~ s/^#!//;
+            ( $exec_file = $param1 ) =~ s/\s.*$//;
+            if ( -x $exec_file ) {
+                if ( open( XOUT, "$param1|" ) ) {
+                    while (<XOUT>) {
+                        $xout = $_;
+                    }
+                    close(XOUT);
+                    chomp $xout;
+                    for ( 0 .. $#{$results} ) {
+                        $msg = "b " . $results->[$_];
+                        &debug( $block, 'debug', $msg );
+                        $results->[$_] = $results->[$_] . " " . $xout;
+                        $msg = "a " . $results->[$_];
+                        &debug( $block, 'debug', $msg );
+                    }
+                }
+                else {
+                    &debug( $block, 'warn',
+                        "exec within modify action cannot run $param1" );
+                }
+            }
+            else {
+                &debug( $block, 'warn',
+                    "exec within modify action cannot run $param1" );
+            }
+        }
+
+    }
+    if ( $opt eq "replace" ) {
+        if ( $param2 !~ /^#!/ ) {
+            for ( 0 .. $#{$results} ) {
+                $msg = "b " . $results->[$_];
+                &debug( $block, 'debug', $msg );
+                $results->[$_] =~ s/$param1/$param2/g;
+                $msg = "a " . $results->[$_];
+                &debug( $block, 'debug', $msg );
+            }
+        }
+        else {
+            $param2 =~ s/^#!//;
+            ( $exec_file = $param2 ) =~ s/\s.*$//;
+            if ( -x $exec_file ) {
+                if ( open( XOUT, "$param2|" ) ) {
+                    while (<XOUT>) {
+                        $xout = $_;
+                    }
+                    close(XOUT);
+                    chomp $xout;
+                    if ( $param1 eq "\^" ) {
+                        $xout .= " ";
+                    }
+                    elsif ( $param1 eq "\$" ) {
+                        $xout = " " . $xout;
+                    }
+                    for ( 0 .. $#{$results} ) {
+                        $msg = "b " . $results->[$_];
+                        &debug( $block, 'debug', $msg );
+                        $results->[$_] =~ s/$param1/$xout/g;
+                        $msg = "a " . $results->[$_];
+                        &debug( $block, 'debug', $msg );
+                    }
+                }
+                else {
+                    &debug( $block, 'warn',
+                        "exec within modify action cannot run $param2" );
+                }
+            }
+            else {
+                &debug( $block, 'warn',
+                    "exec within modify action cannot run $param2" );
+            }
+        }
+    }
+
+    &debug( $block, 'debug', "modify_event end" );
+    return 0;
+}
+
+sub page_event {
+    my ( $pattern, $rcpt, $title, $results, $file ) = @_;
+
+    $mailto = &page_poc($rcpt);
+
+    &title_remembrance( \$title, $results->[0], $pattern );
+    my $name = $Config{$block}{'name'};
+    &filename_substitute( \$name, $file );
+    &cfg_substitute( $block, \$name );
+
+    if ( $title ne "" ) {
+        $subject = "$Config{$block}{'organization'}: $name $title";
+    }
+    else {
+        $subject = "$Config{$block}{'organization'}: $name problem";
+    }
+
+    if ($opt_T) {
+        print "Page to $mailto\n";
+        print "   subject: $subject\n";
+        print "   lines:\n";
+        for (@$results) {
+            print "      $_";
+        }
+        print "\n";
+
+    }
+    else {
+        $body = ["/"];
+        &send_mail( $block, $mailto, $subject, $body, $pattern );
+
+        my ($msg) = sprintf( "sent page to %s (title: %s)", $mailto, $subject );
+        &report( $block, $msg );
+        $mailto = &mail_poc($rcpt);
+        if ( $title ne "" ) {
+            $subject = "$Config{$block}{'organization'}: $name $title content";
+        }
+        else {
+            $subject = "$Config{$block}{'organization'}: $name problem content";
+        }
+        &send_mail( $block, $mailto, $subject, $results, $pattern );
+        $msg = sprintf( "sent mail to %s (title: %s)", $mailto, $subject );
+        &report( $block, $msg );
+    }
+    return;
+}
+
+sub exec_event {
+
+    my ( $rcpt, $results, $pattern, $file ) = @_;
+    my ($msg);
+
+    $rcpt =~ s/\s+$//;
+    $rcpt =~ s/^\s+//;
+    &filename_substitute( \$rcpt, $file );
+
+    my $exec_opt;
+    if ( $rcpt =~ m|--(\w+)\s+| ) {
+        $exec_opt = $1;
+        $rcpt =~ s|--\w+\s+||;
+    }
+
+    # if @1, @2 detected, do not perform single interp.
+
+    if ( $rcpt =~ /\$\d+/ ) {
+        &title_remembrance( \$rcpt, $results->[0], $pattern );
+    }
+
+    if ($opt_T) {
+        if ( $rcpt =~ /\@\d+/ ) {
+            print "Exec:\n";
+            for (@$results) {
+                chomp;
+                $tmp_rcpt = $rcpt;
+                &title_remembrance( \$tmp_rcpt, $_, $pattern );
+                print "$tmp_rcpt < $_\n";
+            }
+            print "\n";
+        }
+        else {
+            print "Exec of $rcpt:\n";
+            for (@$results) {
+                print "> $_";
+            }
+            print "\n";
+        }
+        return;
+    }
+
+    if ( $rcpt =~ /\@\d+/ ) {
+        for (@$results) {
+            chomp;
+            $tmp_rcpt = $rcpt;
+            &title_remembrance( \$tmp_rcpt, $_, $pattern );
+            my $exec_file;
+            ( $exec_file = $tmp_rcpt ) =~ s/\s.*$//;
+            if ( -x $exec_file ) {
+                &debug( $block, 'debug', "about to run '$tmp_rcpt'" );
+                if ( $exec_opt =~ /ignore/ ) {
+                    system($tmp_rcpt);
+                }
+                else {
+                    if ( open( XIN, "|$tmp_rcpt" ) ) {
+                        print XIN "$_\n";
+                        close(XIN);
+                        $msg = sprintf( "executed '%s'", $tmp_rcpt );
+                        &report( $block, $msg );
+                    }
+                    else {
+                        &debug( $block, 'warn', "failed to run '$tmp_rcpt'" );
+                    }
+                }
+            }
+            else {
+                &debug( $block, 'warn', "$exec_file not executable" );
+            }
+        }
+    }
+    else {
+        ( $exec_file = $rcpt ) =~ s/\s.*$//;
+        if ( -x $exec_file ) {
+            &debug( $block, 'debug', "about to run '$exec_file'" );
+            if ( $exec_opt =~ /ignore/ ) {
+                system($tmp_rcpt);
+            }
+            else {
+                if ( open( XIN, "|$rcpt" ) ) {
+                    for (@$results) {
+                        print XIN "$_\n";
+                    }
+                    close(XIN);
+                    $msg = sprintf( "executed '%s'", $rcpt );
+                    &report( $block, $msg );
+                }
+                else {
+                    &debug( $block, 'warn', "exec action cannot run $rcpt" );
+                }
+            }
+        }
+        else {
+            &debug( $block, 'warn', "exec action cannot run $rcpt" );
+        }
+    }
+    return;
+}
+
+sub title_remembrance {
+
+    my ( $title, $line, $pattern, $subpatterns ) = @_;
+    $subpatterns ||= [];
+    &debug( $block, "debug", "t_r t $$title l $line p $pattern" );
+
+    if ( $$title =~ /(^|[^\\])[\$\@](\*|\d+)/ ) {
+        my $x = ();
+
+        # if not passed subpatterns,
+        #    invoke the pattern, gather the replacement values
+        if ( !scalar @$subpatterns ) {
+            if ( $line =~ /$pattern/ ) {
+                my $i = 1;
+                while (1) {
+                    push @{$x}, ${ $i++ };
+                    last if !defined( ${$i} );
+                }
+            }
+        }
+        else {
+            @$x = @$subpatterns;
+        }
+
+        # replace $* with $line
+        $$title =~ s/(^|[^\\])[\$\@]\*/$1$line/g;
+
+        # replace $1,$2,etc with appropriate values
+        for $i ( 0 .. $#{$x} ) {
+            my $j = $i + 1;
+            $$title =~ s/(^|[^\\])[\$\@]$j/$1${$x}[$i]/g;
+        }
+    }
+    return;
+}
+
+sub cfg_substitute {
+    my ( $block, @values ) = @_;
+
+    for $value (@values) {
+        while ( $$value =~ /\$\{?([-a-z_]+)\}?/ ) {
+            my $var = $1;
+            if ( exists $Config{$block}{$var} ) {
+                $$value =~ s/\$\{?$var\}?/$Config{$block}{$var}/ge;
+            }
+            else {
+                &debug( $block, 'warn',
+                    "$var not provided in configuration file block $block" );
+            }
+        }
+    }
+    return;
+}
+
+sub mail_event {
+    my ( $pattern, $rcpt, $title, $results, $file, $subpatterns ) = @_;
+
+    $mailto = &mail_poc($rcpt);
+    my $name = $Config{$block}{'name'};
+    &cfg_substitute( $block, \$name );
+
+    &title_remembrance( \$title, $results->[0], $pattern, $subpatterns );
+    &title_remembrance( \$name,  $results->[0], $pattern, $subpatterns );
+    &filename_substitute( \$name, $file );
+
+    if ($opt_T) {
+        print "Mail to $mailto";
+        print "\n";
+        print "Subject: $Config{$block}{'organization'}: $name ";
+        if ( $title ne "" ) {
+            print "$title\n";
+        }
+        else {
+            print "problem\n";
+        }
+        print "Matching lines:\n";
+        for (@$results) {
+            print "> $_\n";
+        }
+        print "\n";
+    }
+    else {
+        $subject = $Config{$block}{'organization'} . ": $name ";
+        if ( $title ne "" ) {
+            $subject .= "$title";
+        }
+        else {
+            $subject .= "problem";
+        }
+        &send_mail( $block, $mailto, $subject, $results, $pattern );
+        my ($msg) = sprintf( "sent mail to %s (title: %s)", $mailto, $subject );
+        &report( $block, $msg );
+    }
+    return;
+}
+
+sub file_event {
+
+    my ( $file_name, $results, $pattern ) = @_;
+    my ($msg);
+
+    if ( $file_name =~ /\$\d+/ ) {
+        &debug( $block, "debug", "f $file_name l $results->[0]" );
+        &title_remembrance( \$file_name, $results->[0], $pattern );
+    }
+
+    if ( $file_name =~ /\@\d+/ ) {
+        my %tmp_file_names = ();
+        for (@$results) {
+            chomp;
+            $tmp_file_name = $file_name;
+            &title_remembrance( \$tmp_file_name, $_, $pattern );
+            if ($opt_T) {
+                $tmp_file_names{$tmp_file_name} ||= [];
+                push @{ $tmp_file_names{$tmp_file_name} }, $_;
+            }
+            else {
+                if ( !open( FILE, ">> $tmp_file_name" ) ) {
+                    &debug( $block, 'warn',
+                        "cannot append to $tmp_file_name: $!" );
+                }
+                else {
+                    $tmp_file_names{$tmp_file_name}++;
+                    print FILE "$_\n";
+                    close(FILE);
+                }
+            }
+        }
+        for my $tmp_file_name ( sort keys %tmp_file_names ) {
+            if ($opt_T) {
+                print "File to $tmp_file_name:\n";
+                for my $matched_line ( @{ $tmp_file_names{$tmp_file_name} } ) {
+                    print "   $matched_line\n";
+                }
+            }
+            else {
+                $msg = sprintf( "filed data to %s", $tmp_file_name );
+                &report( $block, $msg );
+            }
+        }
+    }
+    else {
+        if ($opt_T) {
+            print "File to $file_name:\n";
+            for (@$results) {
+                chomp;
+                print "   $_\n";
+            }
+        }
+        else {
+            if ( !open( FILE, ">> $file_name" ) ) {
+                &debug( $block, 'warn', "cannot append to $file_name: $!" );
+                return;
+            }
+            for (@$results) {
+                chomp;
+                print FILE "$_\n";
+            }
+            close(FILE);
+            $msg = sprintf( "filed data to %s", $file_name );
+            &report( $block, $msg );
+        }
+    }
+    return;
+}
+
+sub pattern_check {
+    my ($pattern) = shift;
+    my ($out)     = 0;
+
+    # 0 = good, non-0 = bad
+
+    # prevents leading asterisk, slash, or plus
+    if ( $pattern =~ m|^[\*\/\+]| ) {
+        $out++;
+
+        # prevents embedded slash
+    }
+    elsif ( $pattern =~ m|[^\\]/| ) {
+        $out += 2;
+    }
+
+    my $a = "";
+    &debug($block, 'debug', "pattern $pattern");
+    eval { $a =~ m|$pattern|; };
+    $out += 8 if $@;
+
+    return $out;
+}
+
+# rule_label_check
+sub rule_label_check {
+    my ($pattern) = shift;
+    my @return_data;
+    if ( $pattern =~ m/^([a-zA-Z][a-zA-Z0-9\-_\$]+)##(.+)$/ ) {
+        $return_data[0] = $1;
+        $return_data[1] = $2;
+    }
+    else {
+        $return_data[0] = "";
+        $return_data[1] = $pattern;
+    }
+    return @return_data;
+}
+
+# thresh_truncate - look for longest time period for a threshold rule
+#    then truncate all threshold lines older than 2x that time period
+
+sub thresh_truncate {
+
+    # constants
+    my %tf_secs;
+    $tf_secs{'min'}  = 60;
+    $tf_secs{'hour'} = 60 * 60;
+    $tf_secs{'day'}  = 60 * 60 * 24;
+    $tf_secs{'week'} = 60 * 60 * 24 * 7;
+
+    my $max_tf_trunc_time = 0;
+
+    # open rule files
+    for my $block ( sort keys %Config ) {
+        for my $rulefile ( split( / /, $Config{$block}{'rules'} ) ) {
+            &debug( 'main', 'debug', "$block $rulefile" );
+
+            open( RULEFILE, "< $Config{$block}{'home'}${dir_sep}$rulefile" );
+            while (<RULEFILE>) {
+                chomp;
+                next if /^#/;
+                if (m|^if\s+(\S*\s*\d+)\s*/(\s*\d*\s*\S+)\s+|) {
+                    my $thresh_x      = $1;
+                    my $thresh_y_unit = $2;
+                    &debug( 'main', 'debug', "thresh_y_unit $thresh_y_unit" );
+
+                    $thresh_x      =~ s/^\S+\s*//;
+                    $thresh_y_unit =~ s/^\s+//;
+                    my ( $thresh_y, $thresh_unit );
+                    if ( $thresh_y_unit =~ m|(\d+)\s*(\S+)| ) {
+                        $thresh_y    = $1;
+                        $thresh_unit = lc($2);
+                    }
+                    elsif ( $thresh_y_unit =~ m|\s*(\S+)| ) {
+                        $thresh_y    = 1;
+                        $thresh_unit = lc($1);
+                    }
+
+                    my $tf_unit;
+                    if ( $thresh_unit =~ /^(m|min|mins|minute|minutes)$/i ) {
+                        $tf_unit = 'min';
+                    }
+                    elsif ( $thresh_unit =~ /^(h|hr|hour|hrs|hours)$/i ) {
+                        $tf_unit = 'hour';
+                    }
+                    elsif ( $thresh_unit =~ /^(d|day|days)$/i ) {
+                        $tf_unit = 'day';
+                    }
+                    elsif ( $thresh_unit =~ /^(w|wk|week|wks|weeks)$/i ) {
+                        $tf_unit = 'week';
+                    }
+                    &debug( 'main', 'debug', "$thresh_x $thresh_y $tf_unit" );
+                    my $tf_trunc_time = $tf_secs{$tf_unit} * $thresh_y * 2;
+                    if ( $tf_trunc_time > $max_tf_trunc_time ) {
+                        $max_tf_trunc_time = $tf_trunc_time;
+                    }
+                }
+            }
+            close(RULEFILE);
+        }
+    }
+    &debug( 'main', 'debug', "max trunc time $max_tf_trunc_time" );
+
+    # open thresh file for read, and new thresh file for writing
+    my $thresh_file =
+      "$Config{$block}{'tmpdir'}${dir_sep}$Config{$block}{'process'}.thresh";
+    my $new_thresh_file =
+"$Config{$block}{'tmpdir'}${dir_sep}$Config{$block}{'process'}.thresh.new";
+
+    open( THRESH,     "< $thresh_file" );
+    open( NEW_THRESH, "> $new_thresh_file" );
+
+    &debug( $block, 'debug', "thresh_trunc: $Time - $max_tf_trunc_time" );
+    $trunc_timepoint = $Time - $max_tf_trunc_time;
+
+    while (<THRESH>) {
+        chomp;
+        my ( $t_block, $t_label, $t_time, $t_count ) = split(/\t/);
+
+        my $tmp_a = scalar localtime($t_time);
+        my $tmp_b = scalar localtime($trunc_timepoint);
+        &debug( $block, 'debug', "thresh_trunc: '$tmp_a' ? '$tmp_b'" );
+        if ( $t_time >= $trunc_timepoint ) {
+            print NEW_THRESH
+              join( "\t", $t_block, $t_label, $t_time, $t_count ), "\n";
+        }
+    }
+
+    close(THRESH);
+    close(NEW_THRESH);
+
+    unlink($thresh_file);
+    rename( "$new_thresh_file", "$thresh_file" );
+    &debug( $block, 'debug', 'thresh file truncated' );
+    return;
+}
+
+sub thresh_accumulator {
+    my ( $block, $rule_label, $Time, $pattern, $results ) = @_;
+
+    # needs $pattern passed in
+
+    my $match_count = scalar @$results;
+
+    # open thresh file for append
+
+    my $thresh_file =
+      "$Config{$block}{'tmpdir'}${dir_sep}$Config{$block}{'process'}.thresh";
+    open( THRESH, ">> $thresh_file" );
+
+    my %thresh_rule_label;
+    foreach $line (@$results) {
+        my $local_rule_label = $rule_label;
+        &title_remembrance( \$local_rule_label, $line, $pattern );
+        $thresh_rule_label{$local_rule_label}++;
+    }
+    foreach $local_rule_label ( sort keys %thresh_rule_label ) {
+        &debug( $block, "debug",
+            "accum: $block,$local_rule_label,$Time,"
+              . $thresh_rule_label{$local_rule_label} );
+        printf THRESH "%s\t%s\t%d\t%d\n", $block, $local_rule_label, $Time,
+          $thresh_rule_label{$local_rule_label};
+        my $msg = sprintf "THRESH %s\t%s\t%d\t%d\n", $block, $local_rule_label,
+          $Time, $thresh_rule_label{$local_rule_label};
+        &debug( $block, 'debug', $msg );
+    }
+
+    # close and return
+
+    close(THRESH);
+    return;
+}
+
+# thresh_check: determine if an action's threshold has been met
+sub thresh_check {
+    my ( $block, $rule_label, $timeframe, $thresh, $over_under, $pattern,
+        $results )
+      = @_;
+    &debug( $block, "debug",
+"thresh_check: $block,$rule_label,$timeframe,$thresh,$over_under,$pattern"
+    );
+
+    # constants
+
+    my %tf_secs;
+    $tf_secs{'min'}  = 60;
+    $tf_secs{'hour'} = 60 * 60;
+    $tf_secs{'day'}  = 60 * 60 * 24;
+    $tf_secs{'week'} = 60 * 60 * 24 * 7;
+
+    # normalize units
+
+    my ( $tf_count, $tf_unit );
+    if ( $timeframe =~ /(\d+)\s+(\w+)/ ) {
+        $tf_count = $1;
+        if ( $2 =~ /^(m|min|mins|minute|minutes)$/i ) {
+            $tf_unit = 'min';
+        }
+        elsif ( $2 =~ /^(h|hr|hour|hrs|hours)$/i ) {
+            $tf_unit = 'hour';
+        }
+        elsif ( $2 =~ /^(d|day|days)$/i ) {
+            $tf_unit = 'day';
+        }
+        elsif ( $2 =~ /^(w|wk|week|wks|weeks)$/i ) {
+            $tf_unit = 'week';
+        }
+        else {
+            &debug( $block, "warn", "unknown thresh unit $2" );
+            $tf_unit = '';
+        }
+    }
+
+    # open thresh file for read
+    # %thresh_data: key block:time:label
+
+    my $thresh_file =
+      "$Config{$block}{'tmpdir'}${dir_sep}$Config{$block}{'process'}.thresh";
+    open( THRESH, "< $thresh_file" );
+    my %thresh_data;
+    my $t_sum = 0;
+    while (<THRESH>) {
+        chomp;
+        my ( $t_block, $t_label, $t_time, $t_count ) = split(/\t/);
+        my $key = "$t_block:$t_label:$t_time";
+        $thresh_data{$key} = $t_count;
+    }
+    close(THRESH);
+
+    my %thresh_rule_labels;
+    if ( $rule_label =~ /\$\d+/ ) {
+
+        &debug( $block, 'debug', "found dynamic label $rule_label" );
+
+        # keys for %thresh_rule_label are the dynamic labels for @$results
+
+        foreach $line (@$results) {
+            my $local_rule_label = $rule_label;
+            &debug( $block, 'debug2',
+                "b $local_rule_label l $line p $pattern" );
+            &title_remembrance( \$local_rule_label, $line, $pattern );
+            &debug( $block, 'debug2', "a $local_rule_label" );
+            $thresh_rule_labels{$local_rule_label} ||= [];
+            push @{ $thresh_rule_labels{$local_rule_label} }, $line;
+        }
+
+        my $thresh_sum;
+        foreach my $thresh_rule_label ( sort keys %thresh_rule_labels ) {
+
+            $thresh_sum = 0;
+            &debug( $block, 'debug2', "searching for $thresh_rule_label" );
+            foreach my $thresh_line ( sort keys %thresh_data ) {
+
+                my ( $t_block, $t_label, $t_time ) = split( /:/, $thresh_line );
+                my $t_count = $thresh_data{$thresh_line};
+                if (   ( $t_block eq $block )
+                    && ( $t_label eq $thresh_rule_label )
+                    && ( $t_time >= ( $Time - $tf_secs{$tf_unit} * $tf_count ) )
+                  )
+                {
+                    $thresh_sum += $t_count;
+                    &debug( $block, 'debug',
+                        "thresh $t_label $t_time $tf_unit $t_count" );
+                }
+
+            }
+
+            # if threshold not met, delete entry from %thresh_rule_labels
+            if ( $over_under eq "over" ) {
+                if ( $thresh_sum < $thresh ) {
+                    delete $thresh_rule_labels{$thresh_rule_label};
+                }
+            }
+            else {
+                if ( $thresh_sum >= $thresh ) {
+                    delete $thresh_rule_labels{$thresh_rule_label};
+                }
+            }
+        }
+        &debug( $block, 'debug2', "ou $over_under $thresh_sum ? $thresh" );
+    }
+    else {
+        $thresh_rule_labels{$rule_label} ||= [];
+        push @{ $thresh_rule_labels{$rule_label} }, @$results;
+        for my $thresh_line ( sort keys %thresh_data ) {
+            my $t_count = $thresh_data{$thresh_line};
+            my ( $t_block, $t_label, $t_time ) = split( /:/, $thresh_line );
+            if (   ( $t_block eq $block )
+                && ( $t_label eq $rule_label )
+                && ( $t_time >= ( $Time - $tf_secs{$tf_unit} * $tf_count ) ) )
+            {
+                $thresh_sum += $t_count;
+                &debug( $block, 'debug',
+                    "thresh $t_time $rule_label $tf_unit $tf_count" );
+            }
+        }
+
+        # if threshold not met, delete entry from %thresh_rule_labels
+        if ( $over_under eq "over" ) {
+            if ( $thresh_sum < $thresh ) {
+                &debug( $block, 'debug',
+                    "deleting $rule_label: $thresh_sum < $thresh" );
+                delete $thresh_rule_labels{$rule_label};
+            }
+        }
+        else {
+            if ( $thresh_sum >= $thresh ) {
+                &debug( $block, 'debug',
+                    "deleting $rule_label: $thresh_sum >= $thresh" );
+                delete $thresh_rule_labels{$rule_label};
+            }
+        }
+    }
+
+    return \%thresh_rule_labels;
+}
+
+# gather_range_block: given an array of data and a pattern,
+#     produce the lines that match between the two sections of the pattern
+#     within a specific line count
+
+sub gather_range_block {
+
+    my ( $pattern, $s ) = @_;
+
+    my @results;
+    my $msg;
+    $msg = "pattern $pattern " . scalar @$s . " lines to examine";
+    &debug( $block, 'debug', $msg );
+
+    $pattern =~ /^(.*?)\s+\+(\d+)\s+(.*?)$/;
+    $first_pattern = $1;
+    $first_pattern =~ s/^\s+//;
+    $first_pattern =~ s/\s+$//;
+    $distance       = $2;
+    $second_pattern = $3;
+    &debug( $block, 'debug',
+        "range /$first_pattern/ $distance /$second_pattern/" );
+
+    if ( &pattern_check($first_pattern) ) {
+        &report( $block, "pattern $first_pattern contains metachar" );
+        return;
+    }
+
+    if ( &pattern_check($second_pattern) ) {
+        &report( $block, "pattern $second_pattern contains metachar" );
+        return;
+    }
+    my $done = 1;
+    while ( $done == 1 ) {
+        $done = 0;
+        my $line_count = scalar @$s - 1;
+      LOOP: 
+        for my $first ( 0 .. $line_count ) {
+            &debug( $block, 'debug', "looking for $first_pattern" );
+            $msg = "? $first " . $s->[$first];
+            &debug( $block, 'debug', $msg );
+            if ( $s->[$first] =~ /$first_pattern/ ) {
+                my $i = 1;
+                while (1) {
+                    push @subpatterns, ${$i};
+                    last if !defined( ${$i} );
+                    $i++;
+                }
+                for my $second ( $first + 1 .. $first + $distance ) {
+                    &debug( $block, 'debug', "looking for $second_pattern" );
+                    $msg = "? " . $s->[$second];
+                    &debug( $block, 'debug', $msg );
+                    if ( $s->[$second] =~ /$second_pattern/ ) {
+
+                        # gather ()s, append to previous ()s
+                        my $i = 1;
+                        while (1) {
+                            push @subpatterns, ${$i};
+                            last if !defined( ${$i} );
+                            $i++;
+                        }
+                        #unshift @results, splice( @$s, $second, 1 );
+                        #unshift @results, splice( @$s, $first,  1 );
+                        unshift @results, splice( @$s, $first,  ($second - $first + 1) );
+                        $done = 1;
+                        last LOOP;
+                    }
+                }
+            }
+        }
+    }
+    return @results;
+}
+
+# gather_open_block: given an array of data and a pattern,
+#     produce the lines that match between the two sections of the pattern
+
+sub gather_open_block {
+
+    my ( $pattern, $s ) = @_;
+    my @results;
+
+    $pattern =~ /(^.*?) \.\.\. (.*?$)/;
+    $head_pattern = $1;
+    $tail_pattern = $2;
+    if ( &pattern_check($head_pattern) ) {
+        &report( $block, "pattern $head_pattern contains metachar" );
+        next;
+    }
+    if ( &pattern_check($tail_pattern) ) {
+        &report( $block, "pattern $tail_pattern contains metachar" );
+        next;
+    }
+    my $done = 1;
+    while ($done) {
+        $done = 0;
+      LOOP:
+        for my $h ( 0 .. $#{$s} ) {
+
+            if ( $s->[$h] =~ /$head_pattern/ ) {
+
+                # gather ()s
+                my $i = 1;
+                while (1) {
+                    push @subpatterns, ${ $i++ };
+                    last if !defined( ${$i} );
+                }
+                for my $t ( $h + 1 .. $#{$s} ) {
+                    if ( $s->[$t] =~ /$tail_pattern/ ) {
+
+                        # gather ()s, append to previous ()s
+                        my $i = 1;
+                        while (1) {
+                            push @subpatterns, ${ $i++ };
+                            last if !defined( ${$i} );
+                        }
+                        my $l = $t - $h + 1;
+                        push @results, splice( @$s, $h, $l );
+                        $done = 1;
+                        last LOOP;
+                    }
+                }
+            }
+        }
+    }
+    return @results;
+}
+
+# gather_multi_pattern_match_block: given an array of data and a pattern,
+#     produce the lines that match multiple patterns
+
+sub gather_multi_pattern_match_block {
+
+    my ( $pattern, $s ) = @_;
+
+    my $msg;
+    &debug( $block, 'debug', $msg );
+
+    my @results;
+    my @res;
+    my @subpatterns;
+    my @tmp = @$s;
+
+    # run $s data through cascading grep's, finding
+    #   the lines that match each portion of the pattern
+
+    my @patterns = split( /\s+&&\s+/, $pattern );
+    for my $patt (@patterns) {
+        if ( &pattern_check($patt) ) {
+            &report( $block, "pattern $patt contains metachar" );
+            next;
+        }
+        my @res = grep( /$patt/, @tmp );
+        $msg = "looking for /$patt/";
+        &debug( $block, 'debug', $msg );
+        my $null;
+        if ( scalar @res ) {
+            $msg = "found /$patt/";
+            &debug( $block, 'debug', $msg );
+            ( $null = $res[0] ) =~ /$patt/;
+            my $i = 1;
+            while (1) {
+                push @subpatterns, ${ $i++ };
+                last if !defined( ${$i} );
+            }
+            @tmp = @res;
+        } else {
+            $msg = "failed to find /$patt/ ... clearing array";
+            &debug( $block, 'debug', $msg );
+            undef @tmp;
+            last;
+        }
+    }
+    return @tmp;
+}
+
+# org_test: look for organization-based if statement, and
+#     return a -1/0/+1 value based on comparison of
+#     configuration data and the data in the action
+
+sub org_test {
+    my ( $block, $action ) = @_;
+
+    my $org_flag = 0;
+
+    if ( $$action =~ /^if\s+org\S*\s+eq\s+['"](\S+)['"]\s+/ ) {
+        $org_val = $1;
+        if ( $Config{$block}{"organization"} eq $org_val ) {
+            $org_flag = 1;
+        }
+        else {
+            $org_flag = -1;
+        }
+        $$action =~ s/^if\s+org\S*\s+eq\s+['"](\S+)['"]\s+//;
+    }
+    return $org_flag;
+}
+
+# simple_thresh_test: a simple threshold
+#     return a true/false value based on comparison of
+#     the number of lines matched with the value in the action
+
+sub simple_thresh_test {
+    my ( $block, $action, $results ) = @_;
+
+    my $thresh_flag = 0;
+    my $eval;
+    if ( $$action =~ /^if\s+([<>!=]=|[<>])\s*(\d+)\s+/ ) {
+        my $rel  = $1;
+        my $val  = $2;
+        my $msg = "? $rel $val\n";
+        &debug($block, 'debug', $msg);
+        my $eval = scalar @$results . " $rel $val";
+        if ( eval $eval ) {
+            $thresh_flag = 1;
+            &debug($block, 'debug', 'eval true');
+        }
+        else {
+            $thresh_flag = -1;
+            &debug($block, 'debug', 'eval false');
+        }
+        $$action =~ s/^if\s+([<>!=]=|[<>])\s*(\d+)\s+//;
+    }
+    return $thresh_flag;
+}
+
+# true_thresh_test: a simple threshold
+#     return a true/false value based on comparison of
+#     the number of lines matched with the value in the action
+
+sub true_thresh_test {
+    my ( $block, $action, $rule_label, $pattern, $results ) = @_;
+    &debug( $block, 'debug', "ttt: $$action, $rule_label" );
+
+    my $true_thresh_flag = 0;
+    my @thresh_units     = qw(m min minute mins minutes
+      h hr hour hrs hours
+      d day days
+      w wk week wks weeks);
+
+    if ( $$action =~ m|^if\s+(\S*\s*\d+)\s*/(\s*\d*\s*\S+)\s+| ) {
+        my $thresh_o_u_x  = $1;
+        my $thresh_y_unit = $2;
+        my ( $thresh_over_under, $thresh_x );
+        if ( $thresh_o_u_x =~ m|over\s+(\d+)| ) {
+            $thresh_over_under = 'over';
+            $thresh_x          = $1;
+        }
+        elsif ( $thresh_o_u_x =~ m|under\s+(\d+)| ) {
+            $thresh_over_under = 'under';
+            $thresh_x          = $1;
+        }
+        elsif ( $thresh_o_u_x =~ m|(\d+)| ) {
+            $thresh_over_under = 'over';
+            $thresh_x          = $1;
+        }
+
+        $thresh_y_unit =~ s/^\s+//;
+        my ( $thresh_y, $thresh_unit );
+        if ( $thresh_y_unit =~ m|(\d+)\s*(\S+)| ) {
+            $thresh_y    = $1;
+            $thresh_unit = lc($2);
+        }
+        elsif ( $thresh_y_unit =~ m|\s*(\S+)| ) {
+            $thresh_y    = 1;
+            $thresh_unit = lc($1);
+        }
+
+        &debug( $block, 'debug',
+            "thresh: $thresh_over_under $thresh_x $thresh_y $thresh_unit" );
+        if ( grep ( $thresh_unit, @thresh_units ) ) {
+            &debug( $block, "debug",
+"found thresh: $thresh_over_under $thresh_x / ${thresh_y} ${thresh_unit} $Time"
+            );
+            my $timeframe = "$thresh_y $thresh_unit";
+            $true_thresh_flag =
+              &thresh_check( $block, $rule_label, $timeframe, $thresh_x,
+                $thresh_over_under, $pattern, $results );
+            &debug( $block, "debug",
+                "ttt test: " . scalar keys %$true_thresh_flag );
+        }
+        $$action =~ s|^if\s+(\S*\s*\d+)\s*/(\s*\d*\s*\S+)\s+||;
+        return $true_thresh_flag;
+    }
+    else {
+        &debug( $block, "debug", "no if statement found" );
+        return 0;
+    }
+}
+
+# determine if the instance is running during a configured 'quiet' period
+sub quiet_test {
+    my ($block) = @_;
+    my $quiet_flag = 1;
+    my $quiet_value = $Config{$block}{'quiet'} || "";
+    my @quiet_config = split( /\s+/, $quiet_value );
+
+    my @quiet_lt = ( localtime(time) )[ 1, 2, 3, 4, 6 ];
+
+    my $crontab_data = {
+        'min'   => { 'min' => 0, 'max' => '59' },
+        'hour'  => { 'min' => 0, 'max' => '23' },
+        'day'   => { 'min' => 1, 'max' => '31' },
+        'month' => { 'min' => 1, 'max' => '12' },
+        'dow'   => { 'min' => 0, 'max' => '6' },
+    };
+
+    my @crontab_order = qw(min hour day month dow);
+
+    for $quiet_val ( 0 .. $#quiet_config ) {
+        my $time_order = $crontab_order[$quiet_val];
+        my %set        = ();
+        for ( split( ",", $quiet_config[$quiet_val] ) ) {
+            if (/-/) {
+                my ( $start, $end ) = split(/-/);
+                for $val ( $start .. $end ) {
+                    $set{$val}++;
+                }
+            }
+            else {
+                if (/\*/) {
+                    for $q ( $crontab_data->{$time_order}
+                        ->{'min'} .. $crontab_data->{$time_order}->{'max'} )
+                    {
+                        $set{$q}++;
+                    }
+                }
+                else {
+                    $set{$q}++;
+                }
+            }
+        }
+        if ( !defined( $set{ $quiet_lt[$quiet_val] } ) ) {
+            $quiet_flag = -1;
+        }
+    }
+
+    return $quiet_flag;
+}
+
+# iterate through rulesets: matching patterns invoke action specified
+sub process_data {
+    my ( $file, $Target, $s, $Time ) = @_;
+    &debug( $block, 'debug', "Time $Time" );
+
+    my @results;
+    my ($msg);
+
+    for $index ( 0 .. $#Rules ) {
+        my $ref = $Rules[$index];
+        undef @results;
+        undef @subpatterns;
+
+        my $rule_label;
+        my $pattern;
+
+        ( $rule_label, $pattern ) = &rule_label_check( $ref->{pattern} );
+        &debug( $block, "debug", "label $rule_label pattern $pattern" );
+
+        $pattern = &pattern_expiration_check($pattern);
+        next if !$pattern;
+
+        if ( $pattern =~ /^! (.*)$/ ) {
+            my $neg_pattern = $1;
+            &debug( $block, "debug", "found negative pattern $neg_pattern" );
+            if ( &pattern_check($neg_pattern) ) {
+                &report( $block, $block,
+                    "pattern $neg_pattern contains metachar" );
+                next;
+            }
+            if ( grep( !/$neg_pattern/, @$s ) ) {
+                &debug( $block, "debug", "no match found" );
+                @results = ("negative match");
+            }
+        }
+        elsif ( $pattern =~ /^(.*?) \+(\d+) (.*?)$/ ) {
+            @results = &gather_range_block( $pattern, $s );
+        }
+        elsif ( $pattern =~ /(^.*?) \.\.\. (.*?$)/ ) {
+            @results = &gather_open_block( $pattern, $s );
+        }
+        elsif ( $pattern =~ / && / ) {
+            @results = gather_multi_pattern_match_block( $pattern, $s );
+        }
+        else {
+            if ( &pattern_check($pattern) ) {
+                &report( $block, $block, "pattern $pattern contains metachar" );
+                next;
+            }
+            @results = grep( /$pattern/, @$s );
+        }
+
+        my @tmp;
+        for (@results) { push @tmp, $_ if !/^\.$/; }
+        @results = @tmp;
+        undef @tmp;
+
+        $results = \@results;
+        my %mark;
+        for (@results) { $mark{$_}++; }
+
+        if ( scalar @results ) {
+            $msg = sprintf( "found %d entries matching /%s/",
+                scalar @results, $pattern );
+            &report( $block, $msg );
+
+            # to prevent multiple accumulations
+
+            if ($rule_label) {
+                &thresh_accumulator( $block, $rule_label, $Time, $pattern,
+                    $results );
+            }
+
+            if ( $Chkconfig{$block}{'maint'} ) {
+                if ( $Chkconfig{$block}{'maint'} eq "on" ) {
+                    &report( $block, "maintenance mode - no actions taken" );
+                }
+            }
+            else {
+                for $line ( @{ $ref->{actions} } ) {
+                    &debug($block, 'debug', "line $line");
+                    ( $action, $title ) = split( /;/, $line );
+                    $title  =~ s/^ +// if $title;
+                    $action =~ s/ +$//;
+
+
+                    my $true_thresh_flag;
+                    my $thresh_flag;
+                    my $org_flag;
+
+                    my $quiet_flag;
+                    $quiet_flag  = &quiet_test($block);
+                    $org_flag    = &org_test( $block, \$action );
+                    $thresh_flag =
+                      &simple_thresh_test( $block, \$action, \@results );
+                    $true_thresh_flag =
+                      &true_thresh_test( $block, \$action, $rule_label,
+                        $pattern, \@results );
+
+                    ( $mode, $rcpt ) = split( /\s+/, $action, 2 );
+                    &debug( $block, 'debug', "m $mode r $rcpt" );
+
+                    # do what you want to: page, mail, ignore
+                    if ( $opt_N{$block} ) {
+                        &report( $block, "rule downgraded" );
+                        $mode  =~ s/^page$/mail/;
+                        $rcpt  =~ s/^oncall$/admin/;
+                        $title =~ s/(MINOR|MAJOR|CRITICAL)/WARNING/;
+                    }
+                    &debug( $block, 'debug', "about to check flags" );
+                    if (
+                           $quiet_flag >= 0
+                        && $org_flag >= 0
+                        && $thresh_flag >= 0
+                        && ( !$true_thresh_flag
+                            || scalar keys %$true_thresh_flag >= 1 )
+                      )
+                    {
+                        &debug( $block, 'debug', "flags pass ok" );
+                        if ( $mode eq "mail" ) {
+
+                            if ( scalar keys %$true_thresh_flag >= 1 ) {
+                                &debug( $block, 'debug',
+                                    "sending dynamic mail" );
+                                for my $thresh_key ( keys %$true_thresh_flag ) {
+                                    &mail_event(
+                                        $pattern,
+                                        $rcpt,
+                                        $title,
+                                        \@{ $true_thresh_flag->{$thresh_key} },
+                                        $file,
+                                        \@subpatterns
+                                    );
+                                }
+                            }
+                            else {
+                                &debug( $block, 'debug', "sending mail" );
+                                &mail_event( $pattern, $rcpt, $title, \@results,
+                                    $file, \@subpatterns );
+                            }
+
+                        }
+                        elsif ( $mode eq "modify" ) {
+                            &debug( $block, 'debug', "running modify" );
+                            &modify_event( $pattern, $rcpt, $results );
+                        }
+                        elsif ( $mode eq "page" ) {
+
+                            if ( scalar keys %$true_thresh_flag >= 1 ) {
+                                &debug( $block, 'debug',
+                                    "sending dynamic page" );
+                                for my $thresh_key ( keys %$true_thresh_flag ) {
+                                    &page_event(
+                                        $pattern,
+                                        $rcpt,
+                                        $title,
+                                        \@{ $true_thresh_flag->{$thresh_key} },
+                                        $file
+                                    );
+                                }
+                            }
+                            else {
+                                &page_event( $pattern, $rcpt, $title, \@results,
+                                    $file );
+                            }
+
+                        }
+                        elsif ( $mode eq "exec" ) {
+
+                            if ( scalar keys %$true_thresh_flag >= 1 ) {
+                                &debug( $block, 'debug',
+                                    "sending dynamic exec" );
+                                for my $thresh_key ( keys %$true_thresh_flag ) {
+                                    &exec_event(
+                                        $rcpt,
+                                        \@{ $true_thresh_flag->{$thresh_key} },
+                                        $pattern,
+                                        $file
+                                    );
+                                }
+                            }
+                            else {
+                                &exec_event( $rcpt, \@results, 
+                                             $pattern, $file );
+                            }
+
+                        }
+                        elsif ( $mode eq "file" ) {
+
+                            if ( scalar keys %$true_thresh_flag >= 1 ) {
+                                &debug( $block, 'debug',
+                                    "sending dynamic file" );
+                                for my $thresh_key ( keys %$true_thresh_flag ) {
+                                    &file_event(
+                                        $rcpt,
+                                        \@{ $true_thresh_flag->{$thresh_key} },
+                                        $pattern
+                                    );
+                                }
+                            }
+                            else {
+
+                                &file_event( $rcpt, \@results, $pattern );
+                            }
+                        }
+                        else {
+                            &report( $block, "ignored" );
+                        }
+                    }
+                    elsif ( $thresh_flag == -1 || $true_thresh_flag == -1 ) {
+                        &report( $block, "threshhold not met for $action" );
+                    }
+                    elsif ( $quiet_flag == -1 ) {
+                        &report( $block, "in quiet mode" );
+                    }
+                    elsif ( $org_flag == -1 ) {
+                        &report( $block, "wrong organization" );
+                    }
+                }
+            }
+        }
+        &debug( $block, "debug", "results processing complete" );
+
+        if ( scalar @results ) {
+            if ( $pattern !~ / \.\.\. / ) {
+
+                # exclude matching lines from array
+                my @t;
+                if ( $Config{$block}{"IRS"} ) {
+                    for (@$s) {
+                        if ( !/$pattern/ ) {
+                            push @t, $_;
+                        }
+                    }
+                    @$s = @t;
+                    undef @t;
+                }
+                else {
+                    @t = grep( !$mark{$_}, @$s );
+                }
+                @$s   = @t;
+                @t    = ();
+                %mark = ();
+            }
+        }
+
+        undef @results;
+    }
+
+    undef $s;
+}
+
+sub set_lock {
+
+    if ($^O eq "MSWin32") {
+        &debug($block, 'warn', "no flock on MSWin32");
+    } else {
+        $lockfile =
+          "$Config{$block}{'tmpdir'}${dir_sep}$Config{$block}{'process'}.lock";
+        if ( !open( LOCK_FH, "> $lockfile" ) ) {
+            &debug( $block, 'crit', "cannot open lockfile" );
+            &close_logs;
+            exit(2);
+        }
+        select( ( select(LOCK_FH), $| = 1 )[0] );
+
+        eval {
+            local $SIG{ALRM} = sub { die "alarm\n" };
+            alarm 5;
+            flock( LOCK_FH, LOCK_EX );
+            alarm 0;
+        };
+        if ($@) {
+            &debug( $block, 'crit', "previous OmniCheck instance detected" );
+            &close_logs;
+            exit(2);
+        }
+        else {
+            &debug( $block, 'info', "obtained lock" );
+            print LOCK_FH "lock $$\n";
+            return;
+        }
+    }
+}
+
+sub clear_lock {
+    if ($^O eq "MSWin32") {
+        &debug($block, 'warn', "no flock on MSWin32");
+    } else {
+        print LOCK_FH "unlock $$\n";
+        flock( LOCK_FH, LOCK_UN );
+        close(LOCK_FH);
+        &debug( $block, 'info', "released lock" );
+    }
+}
+
+sub fullname_substitute {
+
+    my $string = shift;
+    my $file   = shift;
+
+    if ( $$string =~ /FULLNAME/ ) {
+        $$string =~ s/FULLNAME/$file/;
+        if ( $$string =~ /=~/ ) {
+            ( $value, $action ) = split( /\s+=~\s+/, $$string, 2 );
+            my $var  = $value;
+            my $code = "\$var =~ $action";
+            eval $code;
+            $$string = $var;
+        }
+    }
+    return \$string;
+}
+
+sub filename_substitute {
+
+    my $string = shift;
+    my $file   = shift;
+    my $basefile;
+
+    if ( $$string =~ /FILENAME/ ) {
+        ( $basefile = $file ) =~ s|.*/||;
+        $$string =~ s/FILENAME/$basefile/;
+        if ( $$string =~ /=~/ ) {
+            ( $value, $action ) = split( /\s+=~\s+/, $$string, 2 );
+            my $var  = $value;
+            my $code = "\$var =~ $action";
+            eval $code;
+            $$string = $var;
+        }
+    }
+    return \$string;
+}
+
+sub HUP_handler {
+    $SIG{HUP} = \&HUP_handler;
+    $snooze = 0;
+    &debug( $block, 'info', "morning already?" );
+    return;
+}
+
+sub snooze {
+    local $SIG{HUP} = \&HUP_handler;
+    local $snooze = $Config{$block}{'interval'} - ( time - $Time );
+    &debug( $block, 'info', "going to sleep $snooze seconds" );
+    while ( $snooze > 0 ) {
+        sleep(1);
+        $snooze--;
+    }
+    &debug( $block, 'info', "yawn..." );
+}
+
+sub close_logs {
+    close(OUT);
+    close(ERR);
+    return;
+}
+
+sub expand_filename {
+    my $input = shift;
+    my $output;
+    my @lt = localtime(time);
+    $output = $input;
+    $output =~ s/%Y/sprintf("%04d", $lt[5]+1900)/e;
+    $output =~ s/%m/sprintf("%02d", $lt[4]+1)/e;
+    $output =~ s/%d/sprintf("%02d", $lt[3])/e;
+    $output =~ s/%H/sprintf("%02d", $lt[2])/e;
+    $output =~ s/%M/sprintf("%02d", $lt[1])/e;
+    $output =~ s/%S/sprintf("%02d", $lt[0])/e;
+
+    return $output;
+}
+
+#        remove redundant code
+#        expand configurability for .out/.err filenames
+#        renamed from open_files to open_logs
+
+sub open_logs {
+    my ($mode) = shift;
+
+    my $temp_directory;
+    if ( $^O =~ /win32/i ) {
+        if ( -d "C:\\TEMP" ) {
+            $temp_directory = "C:\\TEMP";
+        }
+        elsif ( -d "C:\\TMP" ) {
+            $temp_directory = "C:\\TMP";
+        }
+        else {
+            $temp_directory = "C:";
+        }
+    }
+    else {
+        $temp_directory = "/tmp";
+    }
+
+    if ($mode) {
+        close(OUT);
+        close(ERR);
+        my $out = &expand_filename( $Config{'main'}{'out'} )
+          || "omnicheck.out";
+        my $err = &expand_filename( $Config{'main'}{'err'} )
+          || "omnicheck.err";
+        if ( defined( $Config{'main'}{'logs'} ) ) {
+            if ( !open( ERR, ">> $Config{'main'}{'logs'}${dir_sep}$err" ) ) {
+                printf STDERR "cannot open $err: $!\n";
+            }
+            if ( !open( OUT, ">> $Config{'main'}{'logs'}${dir_sep}$out" ) ) {
+                printf STDERR "cannot open $out: $!\n";
+            }
+        }
+        else {
+            if ( !open( OUT, ">> $Config{'main'}{'home'}${dir_sep}$out" ) ) {
+                printf STDERR "cannot open $err: $!\n";
+            }
+            if ( !open( ERR, ">> $Config{'main'}{'home'}${dir_sep}$err" ) ) {
+                printf STDERR "cannot open $out: $!\n";
+            }
+        }
+        select( ( select(OUT), $| = 1 )[0] );
+        select( ( select(ERR), $| = 1 )[0] );
+
+        # move all messages from temp logfiles into real logfiles
+        open( IN, "< $temp_directory${dir_sep}omnicheck_$$.out" );
+        while (<IN>) {
+            chomp;
+            print OUT $_;
+        }
+        close(IN);
+        unlink("$temp_directory${dir_sep}omnicheck_$$.out");
+
+        open( IN, "< $temp_directory${dir_sep}omnicheck_$$.err" );
+        while (<IN>) {
+            chomp;
+            print ERR "$_\n";
+        }
+        close(IN);
+        unlink("$temp_directory${dir_sep}omnicheck_$$.err");
+
+        &debug( $block, 'debug', 'actual logfiles opened' );
+
+    }
+    else {
+
+        if ( !open( ERR, "> $temp_directory${dir_sep}omnicheck_$$.err" ) ) {
+            printf STDERR "tmp .err broken: $!\n";
+        }
+        if ( !open( OUT, "> $temp_directory${dir_sep}omnicheck_$$.out" ) ) {
+            printf STDERR "tmp .out broken: $!\n";
+        }
+        select( ( select(OUT), $| = 1 )[0] );
+        select( ( select(ERR), $| = 1 )[0] );
+
+        &debug( $block, 'debug', 'tmp logfiles opened' );
+
+    }
+    return;
+}
+
+#main
+
+my %MTime;
+$first_time = 1;
+
+# set directory separator
+if ( $^O =~ /win32/i ) {
+    $dir_sep = "\\";
+}
+else {
+    $dir_sep = "/";
+}
+
+&open_logs(0);
+&parse_args;
+
+do {
+    $Time = time;
+    &read_config($first_time);
+    &set_lock if $first_time;
+    $first_time = 0;
+    &open_logs(1);
+    &set_temp;
+
+    &analyze_tellfile;
+
+    my $using_IRS = 0;
+    for $block ( sort keys %Config ) {
+        if ( defined( $Config{$block}{'IRS'} ) ) {
+            $using_IRS = 1;
+        }
+    }
+    if ( $opt_P && $using_IRS ) {
+        &debug( $block, 'crit',
+            "cannot use persistent mode with multi-line records... exiting" );
+        &close_logs;
+        exit 10;
+    }
+
+    # need to have config read before initialization
+    if ( $opt_I || $opt_re_init ) {
+        &set_lock;
+        &init;
+        &clear_lock;
+        &close_logs;
+
+        if ($opt_P) {
+            $opt_I       = "";
+            $opt_re_init = "";
+        }
+        else {
+            exit 0;
+        }
+    }
+
+    &thresh_truncate();
+    for $block ( sort keys %Config ) {
+        next unless $block;
+        if ($opt_T) {
+            next unless $block = $opt_B;
+        }
+        my $target = $Config{$block}{'target'} || $uname[1];
+        &read_rules($block);
+
+        my $newtell;
+        my $oldfile;
+        if ( ref $Config{$block}{'file'} eq "ARRAY" ) {
+            for $file ( @{ $Config{$block}{'file'} } ) {
+                $Target = $Config{$block}{'target'} || $uname[1];
+                &filename_substitute( \$Target, $file );
+
+                $old_file = "";
+                my $data = &get_data($file, $old_file, \$newtell);
+                &process_data( $file, $Target, $data, $Time );
+                &update_tell($block, $file, \$newtell);
+                undef $data;
+            }
+        } elsif ( ref $Config{$block}{'file'} eq "HASH" ) {
+            for $file ( keys %{ $Config{$block}{'file'} } ) {
+                $Target = $Config{$block}{'target'} || $uname[1];
+                $old_file = $Config{$block}{'file'}->{$file};
+                &filename_substitute( \$Target, $file );
+
+                my $newtell;
+                my $data = &get_data( $file, $old_file, \$newtell );
+                &process_data( $file, $Target, $data, $Time );
+                &update_tell($block, $file, \$newtell);
+                undef $data;
+            }
+        } else {
+            $Target = $Config{$block}{'target'} || $uname[1];
+            &filename_substitute( \$Target, $file );
+
+            my $data = &get_data( $Config{$block}{'file'},
+                                  $Config{$block}{'oldfile'},
+                                  \$newtell );
+            &process_data( $Config{$block}{'file'}, $Target, $data, $Time );
+            &update_tell($block, $Config{$block}{'file'}, \$newtell);
+            undef $data;
+        }
+        $opt_P && &snooze;
+    }
+} while ($opt_P);
+&clear_lock;
+&close_logs;
+exit 0;
+
+sub new_process_data {
+    my ( $file, $block, $Target, $Time ) = @_;
+    my $fh;
+
+    &debug( $block, "debug", "file = $file" );
+    my $tell = &get_tell( $block, $file );
+    &debug( $block, "debug", "tell = $tell" );
+
+    my $line;
+    if ( $MTime{ $Config{$block}{'oldfile'} } <
+        ( stat( $Config{$block}{'oldfile'} ) )[9] )
+    {
+
+        if (   $RawConfig{$block}{'file'} !~ /(^|[^\\])[\[*?]/
+            && $RawConfig{$block}{'file'} !~ /^@/ )
+        {
+            if ( $Config{$block}{'oldfile'} ) {
+                &debug( $block, "info",
+                    "processing oldfile $Config{$block}{'oldfile'}" );
+                $fh = new FileHandle "$Config{$block}{'oldfile'}", "<";
+                seek( $fh, $tell, 0 );
+
+              OLDLINE:
+                while ( $line = &get_line( $file, $block, $fh ) ) {
+
+                    # &debug($block, 'debug', "data: $line");
+                    # clear the matched-line arrays
+                    for my $rule_id ( 0 .. $#Rules ) {
+                        &match_line( $block, $rule_id, $line, $file, $fh )
+                          && next OLDLINE;
+                    }
+                }
+                close($fh);
+                $MTime{ $Config{$block}{'oldfile'} } =
+                  ( stat( $Config{$block}{'oldfile'} ) )[9];
+                &debug($block, 'debug', "MTime{Config_block_oldfile} $MTime{$Config{$block}{'oldfile'}}");
+            }
+        }
+        $tell = 0;
+        &debug( $block, "debug", "top of the file: tell = $tell" );
+    }
+
+    $fh = new FileHandle "$file", "<";
+    seek( $fh, $tell, 0 );
+
+  LINE:
+    while ( $line = &get_line( $file, $block, $fh ) ) {
+        &debug( $block, 'debug', "data: $line" );
+        for my $rule_id ( 0 .. $#Rules ) {
+            &debug( $block, 'debug', "rule_id: $rule_id" );
+            if ( &match_line( $block, $rule_id, $line, $file, $fh ) ) {
+                next LINE;
+            }
+        }
+    }
+
+    &take_action($block);
+    return;
+}
+
+sub take_action {
+
+    my $block = shift;
+
+    for $rule_id ( 0 .. $#Rules ) {
+        &take_one_action( $block, $rule_id );
+    }
+    return;
+}
+
+sub take_one_action {
+    my ( $block, $rule_id ) = @_;
+
+    if ( scalar @{ $Rules[$rule_id]->{'matches'} } ) {
+        &debug( $block, 'debug', "action on rule $rule_id" );
+        my $ref     = $Rules[$rule_id];
+        my $pattern = $Rules[$rule_id]->{'pattern'};
+        ( $rule_label, $pattern ) = &rule_label_check($pattern);
+        &debug( $block, "debug", "label $rule_label pattern $pattern" );
+        for $line ( @{ $ref->{actions} } ) {
+            ( $action, $title ) = split( /;/, $line );
+            &debug( $block, 'debug', "a $action t $title" );
+            $title  =~ s/^ +//;
+            $action =~ s/ +$//;
+
+            #           and simple thresholds
+            #    you can perform org or thresh but not both
+            my $true_thresh_flag;
+            my $thresh_flag;
+            my $org_flag;
+            $org_flag    = &org_test( $block,           \$action );
+            $thresh_flag = &simple_thresh_test( $block, \$action );
+            $true_thresh_flag =
+              &true_thresh_test( $block, \$action, $rule_label,
+                $ref->{'matches'} );
+            if (   $org_flag >= 0
+                && $thresh_flag >= 0
+                && $true_thresh_flag >= 0 )
+            {
+                &debug( $block, 'debug', "flags pass ok" );
+
+                ( $mode, $rcpt ) = split( / /, $action, 2 );
+
+                # do what you want to: page, mail, ignore
+                if ( $opt_N{$block} ) {
+                    &report( $block, "rule downgraded" );
+                    $mode  =~ s/^page$/mail/;
+                    $rcpt  =~ s/^oncall$/admin/;
+                    $title =~ s/(MINOR|MAJOR|CRITICAL)/WARNING/;
+                }
+                if ( $mode eq "mail" ) {
+                    &mail_event( $pattern, $rcpt, $title, $ref->{'matches'},
+                        $file );
+                }
+                elsif ( $mode eq "modify" ) {
+                    &modify_event( $pattern, $rcpt, $ref->{'matches'} );
+                }
+                elsif ( $mode eq "page" ) {
+                    &page_event( $pattern, $rcpt, $title, $ref->{'matches'},
+                        $file );
+                }
+                elsif ( $mode eq "exec" ) {
+                    &exec_event( $rcpt, $ref->{'matches'}, $pattern );
+                }
+                elsif ( $mode eq "file" ) {
+                    &file_event( $rcpt, $ref->{'matches'}, $pattern );
+                }
+                elsif ( $mode eq "modify" ) {
+                    &modify_event( $pattern, $rcpt, $ref->{'matches'} );
+                }
+                else {
+                    &report( $block, "ignored" );
+                }
+            }
+            elsif ( $thresh_flag == -1 || $true_thresh_flag == -1 ) {
+                &report( $block, "threshhold not met for $action" );
+            }
+        }
+        $Rules[$rule_id]->{'matches'} = [];
+    }
+    return;
+}
+
+sub get_line {
+    ( $file, $block, $fh, $mode ) = @_;
+    my $line;
+
+    # mode: 1 = always read from fh
+
+    if ( $mode == 1 ) {
+        if ( $Config{$block}{'IRS'} ) {
+            my $IRS = $Config{$block}{'IRS'};
+            $line = <$fh>;
+            $more = <$fh>;
+            while ( $more !~ /$IRS/ ) {
+                $line .= $more;
+                $more = <$fh>;
+            }
+            push @stored_lines, $more;
+        }
+        else {
+            $line = <$fh>;
+            chomp $line;
+            my $newtell = tell($fh);
+            &update_tell( $block, $file, $newtell );
+        }
+        return $line;
+    }
+
+    if ( scalar @stored_lines ) {
+        if ( $Config{$block}{'IRS'} ) {
+            my $IRS = $Config{$block}{'IRS'};
+            $line = shift @stored_lines;
+            $more = <$fh>;
+            while ( $more !~ /$IRS/ ) {
+                $line .= $more;
+                $more = <$fh>;
+            }
+            push @stored_lines, $more;
+        }
+        else {
+            $line = shift @stored_lines;
+            chomp $line;
+        }
+    }
+    else {
+        if ( $Config{$block}{'IRS'} ) {
+            my $IRS = $Config{$block}{'IRS'};
+            $line = <$fh>;
+            $more = <$fh>;
+            while ( $more !~ /$IRS/ ) {
+                $line .= $more;
+                $more = <$fh>;
+            }
+            push @stored_lines, $more;
+        }
+        else {
+            $line = <$fh>;
+            chomp $line;
+            my $newtell = tell($fh);
+            &update_tell( $block, $file, $newtell );
+        }
+    }
+    return $line;
+
+}
+
+sub pattern_expiration_check {
+    my ($pattern) = @_;
+
+    &debug( $block, 'debug', "exp in $pattern" );
+    my $updated_pattern = "";
+    if ( $pattern =~ /^(\d{8})##/ ) {
+        $pattern_expiration = $1;
+        &debug( $block, 'debug', "found expiration $pattern_expiration" );
+        @lt           = localtime(time);
+        $pattern_time =
+          sprintf( "%04d%02d%02d", 1900 + $lt[5], 1 + $lt[4], $lt[3] );
+        undef @lt;
+        if ( $pattern_time >= $pattern_expiration ) {
+            return $updated_pattern;
+        }
+        ( $updated_pattern = $pattern ) =~ s/^\d{8}##//;
+    }
+    else {
+        $updated_pattern = $pattern;
+    }
+    &debug( $block, 'debug', "exp out $updated_pattern" );
+    return $updated_pattern;
+}
+
+sub match_line {
+    my ( $block, $rule_id, $line, $file, $fh ) = @_;
+    &debug( $block, 'debug', "xyz line $line" );
+
+    my $rc      = 0;
+    my $pattern = $Rules[$rule_id]->{'pattern'};
+    $pattern = &pattern_expiration_check($pattern);
+    return $rc if !$pattern;
+    ( $rule_label, $pattern ) = &rule_label_check($pattern);
+    &debug( $block, 'debug', "pattern $pattern" );
+
+    if ( $pattern =~ /^(.*?) \+(\d+) (.*?)$/ ) {
+        my $fore_pattern = $1;
+        my $distance     = $2;
+        my $aft_pattern  = $3;
+        &debug( $block, 'debug',
+            "bound range: $fore_pattern $distance $aft_pattern" );
+        if ( $line =~ /$fore_pattern/ ) {
+            &debug( $block, 'debug', "fore match: $fore_pattern" );
+            for my $distance_index ( 1 .. $distance ) {
+                my $next_line = &get_line( $file, $block, $fh, 1 );
+                &debug( $block, 'debug', "$distance_index next: $next_line" );
+                if ( $next_line =~ /$aft_pattern/ ) {
+                    &debug( $block, 'debug', "aft match: $aft_pattern" );
+                    push @{ $Rules[$rule_id]->{'matches'} }, $line;
+                    push @{ $Rules[$rule_id]->{'matches'} }, @stored_lines;
+                    push @{ $Rules[$rule_id]->{'matches'} }, $next_line;
+                    $rc++;
+                }
+                else {
+                    push @stored_lines, $next_line;
+                }
+            }
+        }    # else the first pattern doesn't match
+             # add more complex pattern structures
+    }
+    elsif ( $pattern =~ /\s\.\.\.\s/ ) {
+        return $rc;
+    }
+    elsif ( $pattern =~ /^! / ) {
+        return $rc;
+    }
+    elsif ( $pattern =~ / && / ) {
+        my @patterns = split( / && /, $pattern );
+        my $pattern_count = 0;
+        for my $patt (@patterns) {
+            if ( &pattern_check($patt) ) {
+                &report( $block, "pattern $patt contains metachar" );
+                next;
+            }
+            if ( $line =~ /$patt/ ) {
+                $pattern_count++;
+            }
+        }
+        if ( $pattern_count == scalar @patterns ) {
+            push @{ $Rules[$rule_id]->{'matches'} }, $line;
+            $rc++;
+        }
+    }
+    else {
+        if ( &pattern_check($pattern) ) {
+            &report( $block, "pattern $pattern contains metachar" );
+        }
+        else {
+            if ( $line =~ /$pattern/ ) {
+                &debug( $block, 'debug', "matched with /$pattern/" );
+                push @{ $Rules[$rule_id]->{'matches'} }, $line;
+                $rc++;
+            }
+        }
+    }
+    return $rc;
+}
+
+sub get_tell {
+    my ( $block, $file ) = @_;
+    my ($tell);
+
+    my $tellfile =
+      "$Config{'main'}{'tmpdir'}${dir_sep}$Config{'main'}{'process'}.tell";
+
+
+    if ( !open( TELL, "< $tellfile" ) ) {
+        &debug( $block, 'err',
+            "cannot find tellfile $tellfile for reading ... will initialize" );
+        &init();
+        open( TELL, "< $tellfile" );
+    }
+    else {
+        &debug( $block, 'debug', "opened tellfile $tellfile for reading" );
+    }
+
+
+    if ( -z $tellfile ) {
+        &debug( $block, 'crit',
+            "found zero-length tellfile $tellfile ... will re-initialize" );
+        unlink($tellfile);
+        &init();
+        open( TELL, "< $tellfile" );
+    }
+
+    while (<TELL>) {
+        chomp;
+        &debug( $block, 'debug', "in tellfile : $_" );
+        if (/^$block\t$file\t(\d+)$/) {
+            $tell = $1;
+            last;
+        }
+    }
+    close(TELL);
+    &debug( $block, 'debug', "tell = $tell" );
+
+    return $tell;
+}
+
+sub update_tell {
+    my ( $block, $file, $newtell ) = @_;
+
+    if ($$newtell == -1 || $$newtell eq "") {
+        &debug($block, "err",
+               "negative or null tell: will not update tellfile");
+        return;
+    }
+    &debug($block, 'debug', "newtell $$newtell");
+
+    my $tellfile =
+      "$Config{'main'}{'tmpdir'}${dir_sep}$Config{'main'}{'process'}.tell";
+
+    if ( !open( TELL, "< $tellfile" ) ) {
+        &debug( $block, 'err', "cannot read tellfile $tellfile ... exiting" );
+        &close_logs;
+        exit(11);
+    }
+
+    if ( !open( NEWTELL, "> ${tellfile}.new" ) ) {
+        &debug( $block, 'err',
+            "cannot open new tellfile ${tellfile}.new for writing ... exiting"
+        );
+        &close_logs;
+        exit(12);
+    }
+    &debug( $block, 'debug', "updating tellfile $tellfile" );
+
+    my $updated_tell = 0;
+    while (<TELL>) {
+        chomp;
+        if (/$block\t$file\t/) {
+            printf NEWTELL "%s\t%s\t%d\n", $block, $file, $$newtell;
+            &debug( $block, 'debug', "tell: $block:$file now $$newtell" );
+            $updated_tell = 1;
+        }
+        else {
+            print NEWTELL "$_\n";
+        }
+    }
+
+    if (! $updated_tell) {
+        printf NEWTELL "%s\t%s\t%d\n", $block, $file, $$newtell;
+        &debug( $block, 'debug', "brand-new tell: $block:$file now $$newtell" );
+    }
+
+    close(TELL);
+    close(NEWTELL);
+    if ( !unlink("$tellfile") ) {
+        &debug( $block, 'crit', "cannot unlink $tellfile: $!" );
+    }
+    if ( !rename( "${tellfile}.new", "$tellfile" ) ) {
+        &debug( $block, 'crit',
+            "cannot rename ${tellfile}.new to ${tellfile}: $!" );
+    }
+    return;
+}
+
+sub analyze_tellfile {
+    my $tellfile =
+      "$Config{'main'}{'tmpdir'}${dir_sep}$Config{'main'}{'process'}.tell";
+    my $tell_data = {};
+    &debug( 'main', 'notice', 'analyzing tellfile for corruption' );
+    open( TELL, "< $tellfile" );
+    while (<TELL>) {
+        my ( $block, $file, $tell_value ) = split(/\t/);
+        my $key = "${block}__${file}";
+        if ( exists( $tell_data->{$key} ) ) {
+            &debug( 'main', 'crit',
+                'found duplicate tellfile entry... will re-initialize' );
+            close(TELL);
+            unlink($tellfile);
+            &init();
+            return;
+        }
+        else {
+            $tell_data->{$key} = 1;
+        }
+    }
+    &debug( 'main', 'notice', 'tellfile is clean' );
+    close(TELL);
+    return;
+}
+
+__DATA__
+
