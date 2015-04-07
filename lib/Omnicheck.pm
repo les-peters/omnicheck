@@ -27,6 +27,8 @@ our %EXPORT_TAGS = ( 'all' => [ qw(
     get_config_file_mtime
     open_logs
     close_logs
+    log
+    err
 ) ] );
 
 our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
@@ -218,7 +220,7 @@ sub open_logs {
         open(TMP, "< $tmpdir/omnicheck.out");
         while(<TMP>) {
             chomp;
-            print $self->{'_OUT_fh'} "$_\n";
+            print { $self->{'_OUT_fh'} } "$_\n";
         }
         close(TMP);
         unlink("$tmpdir/omnicheck.out");
@@ -227,7 +229,7 @@ sub open_logs {
         open(TMP, "< $tmpdir/omnicheck.err");
         while(<TMP>) {
             chomp;
-            print $self->{'_ERR_fh'} "$_\n";
+            print { $self->{'_ERR_fh'} } "$_\n";
         }
         close(TMP);
         unlink("$tmpdir/omnicheck.err");
@@ -262,18 +264,21 @@ sub close_logs {
 
 sub log {
     my ($self, $message) = @_;
-    my $timestamp = &_create_timestamp;
-    print $self->{'_OUT_fh'} "$timestamp $message\n";
+    my $timestamp = _create_timestamp();
+    print { $self->{'_OUT_fh'} } "$timestamp $message\n";
     return;
 }
 
 sub err {
     my ($self, $message) = @_;
-    my $timestamp = &_create_timestamp;
-    print $self->{'_ERR_fh'} "$timestamp $message\n";
+    my $timestamp = _create_timestamp();
+    print { $self->{'_ERR_fh'} } "$timestamp $message\n";
     return;
 }
 
+sub _create_timestamp {
+   return "0000-00-00 00:00:00";
+}
 
 sub go {
     my ($self) = @_;
