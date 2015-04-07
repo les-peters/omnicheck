@@ -168,17 +168,119 @@ sub parse_config_data {
 
 sub open_logs {
     my ($self) = @_;
+
+    # establish temporary directory for log files until configuration file data is processed
+
+    my $tmpdir;
+    if ($^O eq /win32/i) {
+        if ( -d "C:\\TEMP" ) {
+            $tmpdir = "C:\\TEMP";
+        } elsif ( -d "C:\\TMP" ) {
+            $tmpdir = "C:\\TMP";
+        } else {
+            $tmpdir = "C:";
+        }
+    } else {
+        $tmpdir = "/tmp";
+    }
+
+    if (defined($self->{'config_file_data'})) {
+
+        # if configuration file data has been processed, migrate logs to proper directory    
+
+        my $logdir;
+        if (defined($self->{'config_file_data'}->{'main'}->{'logdir'})) {
+            $logdir = $self->{'config_file_data'}->{'main'}->{'logdir'};
+        } else {
+            $logdir = $self->{'config_file_data'}->{'main'}->{'homedir'};
+        }
+
+        close($self->{'_OUT_fh'});
+        close($self->{'_ERR_fh'});
+
+        my $stdout_filename = join("/", 
+            $logdir,
+            $self->{'config_file_data'}->{'main'}->{'id'}) . ".out";
+        my $stderr_filename = join("/", 
+            $logdir,
+            $self->{'config_file_data'}->{'main'}->{'id'}) . ".err";
+
+        # make sure files can be opened by user
+
+        open($self->{'_OUT_fh'}, ">> $stdout_filename");
+        open($self->{'_ERR_fh'}, ">> $stderr_filename");
+
+        select( ( select($self->{'_OUT_fh'}), $| = 1 )[0] );
+        select( ( select($self->{'_ERR_fh'}), $| = 1 )[0] );
+
+        # copy temporary log entries to permanent log files
+
+        open(TMP, "< $tmpdir/omnicheck.out");
+        while(<TMP>) {
+            chomp;
+            print $self->{'_OUT_fh'} "$_\n";
+        }
+        close(TMP);
+        unlink("$tmpdir/omnicheck.out");
+        $self->log('stdout entries migrated');
+
+        open(TMP, "< $tmpdir/omnicheck.err");
+        while(<TMP>) {
+            chomp;
+            print $self->{'_ERR_fh'} "$_\n";
+        }
+        close(TMP);
+        unlink("$tmpdir/omnicheck.err");
+        $self->log('stderr entries migrated');
+
+
+    } else {
+
+        # if not, open temporary files
+
+        my $stdout_filename = join("/", $tmpdir, 'omnicheck') . ".out";
+        my $stderr_filename = join("/", $tmpdir, 'omnicheck') . ".err";
+
+        # make sure files can be opened by user
+
+        open($self->{'_OUT_fh'}, ">> $stdout_filename");
+        open($self->{'_ERR_fh'}, ">> $stderr_filename");
+
+        select( ( select($self->{'_OUT_fh'}), $| = 1 )[0] );
+        select( ( select($self->{'_ERR_fh'}), $| = 1 )[0] );
+
+        $self->log('temporary stdout created');
+        $self->log('temporary stderr created');
+
+    }
+    return;
 }
 
 sub close_logs {
     my ($self) = @_;
 }
 
+sub log {
+    my ($self, $message) = @_;
+    my $timestamp = &_create_timestamp;
+    print $self->{'_OUT_fh'} "$timestamp $message\n";
+    return;
+}
+
+sub err {
+    my ($self, $message) = @_;
+    my $timestamp = &_create_timestamp;
+    print $self->{'_ERR_fh'} "$timestamp $message\n";
+    return;
+}
+
+
 sub go {
     my ($self) = @_;
     if (! defined($self->{'config_file_data'})) {
         carp "cannot go without configuration data";
     }
+    $self->open_logs();
     $self->parse_config_data();
     if (! defined($self->{'_CONFIG_OK'})) {
         carp "configuration data missing mandatory item(s)";
