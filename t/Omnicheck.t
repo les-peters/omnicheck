@@ -23,19 +23,19 @@ can_ok( __PACKAGE__, 'version'               );
 can_ok( __PACKAGE__, 'get_config_file_data'  );
 can_ok( __PACKAGE__, 'get_config_file_mtime' );
 
-my $o_01 = new Omnicheck;
-isa_ok( $o_01, 'Omnicheck');
-ok($o_01->version(), '0.01');
+my $o_00 = new Omnicheck;
+isa_ok( $o_00, 'Omnicheck');
+ok($o_00->version(), '0.01');
 
-$o_01->configure('./00config');
+$o_01->configure('./01config');
 ok($o_01->get_config_file_data(), 
      [ 'key: value' ]);
 
-my $o_02 = new Omnicheck('./00config');
+my $o_02 = new Omnicheck('./02config');
 ok($o_02->get_config_file_data(),              [ 'key: value' ]);
-ok($o_02->get_config_file_mtime('./00config'), qr/^d+$/);
+ok($o_02->get_config_file_mtime('./02config'), qr/^d+$/);
 
-my $o_03 = new Omnicheck('./01config');
+my $o_03 = new Omnicheck('./03config');
 my $o_03_config_data = $o_03->get_config_file_data();
 my $o_03_config_test = [
     'key1: value1',
@@ -45,3 +45,5 @@ my $o_03_config_test = [
 
 is_deeply($o_03_config_data, $o_03_config_test, "equivalent config data");
 
+my $o_04 = new Omnicheck('./04config');
+$o_04->go();

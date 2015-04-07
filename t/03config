@@ -1,0 +1,3 @@
+key1: value1
+#include  ./01config.incl_file
+#!include ./01config.incl_script
