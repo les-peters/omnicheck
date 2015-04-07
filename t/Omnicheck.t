@@ -49,3 +49,6 @@ $o_04->go();
 
 my $o_05 = new Omnicheck('./05config');
 ok($o_05->go(), qr/configuration data missing mandatory item\(s\)/);
+
+my $o_06 = new Omnicheck;
+ok($o_06->go(), qr/cannot go without configuration data/);
