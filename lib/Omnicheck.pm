@@ -177,11 +177,11 @@ sub close_logs {
 sub go {
     my ($self) = @_;
     if (! defined($self->{'config_file_data'})) {
-        croak "cannot go without configuration data";
+        carp "cannot go without configuration data";
     }
     $self->parse_config_data();
     if (! defined($self->{'_CONFIG_OK'})) {
-        croak "configuration data missing mandatory item(s)";
+        carp "configuration data missing mandatory item(s)";
     }
     $self->open_logs();
     do {

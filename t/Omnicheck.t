@@ -46,3 +46,6 @@ is_deeply($o_03_config_data, $o_03_config_test, "equivalent config data");
 
 my $o_04 = new Omnicheck('./04config');
 $o_04->go();
+
+my $o_05 = new Omnicheck('./05config');
+ok($o_05->go(), qr/configuration data missing mandatory item\(s\)/);
