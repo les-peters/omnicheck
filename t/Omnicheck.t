@@ -35,3 +35,13 @@ my $o_02 = new Omnicheck('./00config');
 ok($o_02->get_config_file_data(),              [ 'key: value' ]);
 ok($o_02->get_config_file_mtime('./00config'), qr/^d+$/);
 
+my $o_03 = new Omnicheck('./01config');
+my $o_03_config_data = $o_03->get_config_file_data();
+my $o_03_config_test = [
+    'key1: value1',
+    'key2: value2',
+    'key3: value3'
+];
+
+is_deeply($o_03_config_data, $o_03_config_test, "equivalent config data");
+
