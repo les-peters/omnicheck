@@ -12,14 +12,16 @@ my @subs = qw(
     go 
     version 
     get_config_file_data 
+    get_config_file_mtime
 );
 
-use_ok( 'Omnicheck', @subs                  );
-can_ok( __PACKAGE__, 'new'                  );
-can_ok( __PACKAGE__, 'configure'            );
-can_ok( __PACKAGE__, 'go'                   );
-can_ok( __PACKAGE__, 'version'              );
-can_ok( __PACKAGE__, 'get_config_file_data' );
+use_ok( 'Omnicheck', @subs                   );
+can_ok( __PACKAGE__, 'new'                   );
+can_ok( __PACKAGE__, 'configure'             );
+can_ok( __PACKAGE__, 'go'                    );
+can_ok( __PACKAGE__, 'version'               );
+can_ok( __PACKAGE__, 'get_config_file_data'  );
+can_ok( __PACKAGE__, 'get_config_file_mtime' );
 
 my $o_01 = new Omnicheck;
 isa_ok( $o_01, 'Omnicheck');
