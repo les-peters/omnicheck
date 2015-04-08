@@ -10,14 +10,6 @@ require Exporter;
 
 our @ISA = qw(Exporter);
 
-# Items to export into callers namespace by default. Note: do not export
-# names by default without a very good reason. Use EXPORT_OK instead.
-# Do not simply export all your public functions/methods/constants.
-
-# This allows declaration	use Omnicheck ':all';
-# If you do not need this, moving things directly into @EXPORT or @EXPORT_OK
-# will save memory.
-
 our %EXPORT_TAGS = ( 'all' => [ qw(
     new 
     configure 
@@ -25,6 +17,9 @@ our %EXPORT_TAGS = ( 'all' => [ qw(
     version 
     _get_config_file_data 
     _get_config_file_mtime
+    _add_action_entry
+    _add_mandatory_main_entry
+    _add_mandatory_perstanza_entry
     _open_logs
     _close_logs
     _log
@@ -46,13 +41,42 @@ sub new {
     bless($self, $classname);
 
     # initialize version, mtime hash
-    $self->{'_VERSION'} = $VERSION;
-    $self->{'_MTIME'} = {};
+    $self->{'_VERSION'}                     = $VERSION;
+    $self->{'_MTIME'}                       = {};
+
+    $self->{'_actions'}                     = {};
+    $self->{'_mandatory_main_entries'}      = {};
+    $self->{'_mandatory_perstanza_entries'} = {};
+
+    $self->_add_mandatory_main_entry('id');
+    $self->_add_mandatory_main_entry('homedir');
+
+    $self->_add_mandatory_perstanza_entry('file');
+    $self->_add_mandatory_perstanza_entry('rules');
 
     # load configuration file if present
     if ($config_filename) {
         $self->_read_config_file($config_filename);
     }
+
+    return $self;
+}
+
+sub _add_action_entry {
+    my ($self, $entry_key) = @_;
+    $self->{'_actions'}->{$entry_key}++;
+    return $self;
+}
+
+sub _add_mandatory_main_entry {
+    my ($self, $entry_key) = @_;
+    $self->{'_mandatory_main_entries'}->{$entry_key}++;
+    return $self;
+}
+
+sub _add_mandatory_perstanza_entry {
+    my ($self, $entry_key) = @_;
+    $self->{'_mandatory_main_entries'}->{$entry_key}++;
     return $self;
 }
 
@@ -129,15 +153,6 @@ sub _get_config_file_mtime {
 sub _parse_config_data {
     my ($self) = @_;
 
-    my $mandatory_main_items = {
-        'id'      => '',
-        'homedir' => ''
-    };
-    my $mandatory_perstanza_items = {
-        'file'    => '',
-        'rules'   => ''
-    };
-
     my $config_stanza = 'main';
     for my $config_file_line (@{$self->{'config_file_data'}}) {
         my ($key, $value) = split(/: +/, $config_file_line, 2);
@@ -148,16 +163,16 @@ sub _parse_config_data {
 
     my $config_ok = 1;
 
-    for my $mandatory_main_item (sort keys %$mandatory_main_items) {
-        if (! defined($self->{'config_data'}->{'main'}->{$mandatory_main_item})) {
+    for my $mandatory_main_entry (sort keys %{$self->{'_mandatory_main_entries'}}) {
+        if (! defined($self->{'config_data'}->{'main'}->{$mandatory_main_entry})) {
             $config_ok = 0;
             last;
         }
     }
 
     for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
-        for my $mandatory_perstanza_item (sort keys %$mandatory_perstanza_items) {
-            if (! defined($self->{'config_data'}->{$stanza}->{$mandatory_perstanza_item})) {
+        for my $mandatory_perstanza_entry (sort keys %{$self->{'_mandatory_perstanza_entries'}}) {
+            if (! defined($self->{'config_data'}->{$stanza}->{$mandatory_perstanza_entry})) {
                 $config_ok = 0;
                 last;
             }
@@ -384,7 +399,7 @@ object.  The object is returned to the caller.
 
 =back
 
-=head1 METHODS
+=head1 STANDARD METHODS
 
 =over 4
 
@@ -402,6 +417,34 @@ functions.  Depending on the configuration, this method will either exit
 with a clean return code once its monitoring/alerting functions are complete,
 exit with an abnormal return code if an exception condition is detected, or
 pause for a specific period of time before resuming its functions.
+
+=back
+
+=head1 DAUGHTER-MODULE METHODS
+
+The following methods are to be used in the creation of 'daughter' modules to
+extend the functionality of Omnicheck, either internally to an organization
+or for use by all via open source.
+
+=over 4
+
+=item _add_action_entry
+
+C<_add_action_entry> is the method that daughter modules can use
+to add to the list of actions to take when a regular expression
+matches content from the log/program being monitored.
+
+=item _add_mandatory_main_entry
+
+C<_add_mandatory_main_entry> is the method that daughter modules can use
+to add to the list of mandatory entries for the Omnicheck configuration file
+main stanza.
+
+=item _add_mandatory_perstanza_entry
+
+C<_add_mandatory_perstanza_entry> is the method that daughter modules can use
+to add to the list of mandatory entries for the Omnicheck configuration file
+stanzas (beyond the 'main' stanza, if present).
 
 =back
 
