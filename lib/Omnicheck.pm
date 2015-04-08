@@ -23,12 +23,12 @@ our %EXPORT_TAGS = ( 'all' => [ qw(
     configure 
     go 
     version 
-    get_config_file_data 
-    get_config_file_mtime
-    open_logs
-    close_logs
-    log
-    err
+    _get_config_file_data 
+    _get_config_file_mtime
+    _open_logs
+    _close_logs
+    _log
+    _err
 ) ] );
 
 our @EXPORT_OK = ( @{ $EXPORT_TAGS{'all'} } );
@@ -77,7 +77,6 @@ sub _read_config_file {
     $self->{'_MTIME'}->{$config_filename} = (stat(CONFIG))[9] or die;
     while(<CONFIG>) {
         chomp;
-
         if (/^#include\s+(.*)$/) {
             my $included_config_file = $1;
             if (! -e $included_config_file) {
@@ -107,6 +106,7 @@ sub _read_config_file {
             }
             close(INCL_SCRIPT);
         } else {
+            next if /^#/;
             push @{$self->{'config_file_data'}}, $_;
         }
     }
@@ -196,19 +196,41 @@ sub _open_logs {
         } else {
             $logdir = $self->{'config_data'}->{'main'}->{'homedir'};
         }
-        $self->_close_logs();
+
+        if (! -d $logdir)  {
+            $self->_err("directory $logdir does not exist");
+            return "directory $logdir does not exist";
+        }
+
+        if (! -w $logdir)  {
+            $self->_err("directory $logdir not writable by user");
+            return "directory $logdir not writable by user";
+        }
 
         my $stdout_filename = join("/", 
             $logdir,
             $self->{'config_data'}->{'main'}->{'id'}) . ".out";
+
+        if (-e $stdout_filename && ! -w $stdout_filename) {
+            $self->_err("stdout file $stdout_filename not writable by user");
+            return "stdout file $stdout_filename not writable by user";
+        }
+
         my $stderr_filename = join("/", 
             $logdir,
             $self->{'config_data'}->{'main'}->{'id'}) . ".err";
 
+        if (-e $stdout_filename && ! -w $stderr_filename) {
+            $self->_err("stderr file $stderr_filename not writable by user");
+            return "stderr file $stderr_filename not writable by user";
+        }
+
+        $self->_close_logs();
+
         # make sure files can be opened by user
-        #open(FH, ">>", $stdout_filename) or croak "a";
-        #$self->{'_OUT_fh'} = *FH;
-        open($self->{'_OUT_fh'}, ">> $stderr_filename") or croak "1";
+        if (! open($self->{'_OUT_fh'}, ">> $stderr_filename")) {
+
+        }
         open($self->{'_ERR_fh'}, ">> $stderr_filename") or croak "2";
 
         select( ( select( $self->{'_OUT_fh'} ), $| = 1 )[0] );
@@ -288,7 +310,8 @@ sub _create_timestamp {
 
 sub go {
     my ($self) = @_;
-    $self->_open_logs();
+    my $rc = $self->_open_logs();
+    return $rc if $rc;
     if (! defined($self->{'config_file_data'})) {
         $self->_err("cannot go without configuration data");
         return "cannot go without configuration data";
@@ -298,12 +321,14 @@ sub go {
             $self->_err("configuration data missing mandatory item(s)");
             return "configuration data missing mandatory item(s)";
         }
-        $self->_open_logs();
+        my $rc = $self->_open_logs();
+        return $rc if $rc;
         do {
     
         } while $self->{'_PERSISTENT'};
     }
     $self->_close_logs();
+    return;
 }
 
 1;

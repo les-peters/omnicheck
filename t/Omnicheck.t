@@ -11,17 +11,17 @@ my @subs = qw(
     configure 
     go 
     version 
-    get_config_file_data 
-    get_config_file_mtime
+    _get_config_file_data 
+    _get_config_file_mtime
 );
 
-use_ok( 'Omnicheck', @subs                   );
-can_ok( __PACKAGE__, 'new'                   );
-can_ok( __PACKAGE__, 'configure'             );
-can_ok( __PACKAGE__, 'go'                    );
-can_ok( __PACKAGE__, 'version'               );
-can_ok( __PACKAGE__, 'get_config_file_data'  );
-can_ok( __PACKAGE__, 'get_config_file_mtime' );
+use_ok( 'Omnicheck', @subs                    );
+can_ok( __PACKAGE__, 'new'                    );
+can_ok( __PACKAGE__, 'configure'              );
+can_ok( __PACKAGE__, 'go'                     );
+can_ok( __PACKAGE__, 'version'                );
+can_ok( __PACKAGE__, '_get_config_file_data'  );
+can_ok( __PACKAGE__, '_get_config_file_mtime' );
 
 my $o_00 = new Omnicheck;
 isa_ok( $o_00, 'Omnicheck');
@@ -52,3 +52,9 @@ ok($o_05->go(), qr/configuration data missing mandatory item\(s\)/);
 
 my $o_06 = new Omnicheck;
 ok($o_06->go(), qr/cannot go without configuration data/);
+
+my $o_07 = new Omnicheck('./07config');
+ok($o_07->go(), qr/directory \S+ does not exist/);
+
+my $o_08 = new Omnicheck('./08config');
+ok($o_08->go(), qr/directory \S+ not writable by user/);
