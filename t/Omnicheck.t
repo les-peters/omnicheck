@@ -27,15 +27,15 @@ my $o_00 = new Omnicheck;
 isa_ok( $o_00, 'Omnicheck');
 ok($o_00->version(), '0.01');
 $o_00->configure('./00config');
-ok($o_00->get_config_file_data(), 
+ok($o_00->_get_config_file_data(), 
      [ 'key: value' ]);
 
 my $o_02 = new Omnicheck('./02config');
-ok($o_02->get_config_file_data(),              [ 'key: value' ]);
-ok($o_02->get_config_file_mtime('./02config'), qr/^d+$/);
+ok($o_02->_get_config_file_data(),              [ 'key: value' ]);
+ok($o_02->_get_config_file_mtime('./02config'), qr/^d+$/);
 
 my $o_03 = new Omnicheck('./03config');
-my $o_03_config_data = $o_03->get_config_file_data();
+my $o_03_config_data = $o_03->_get_config_file_data();
 my $o_03_config_test = [
     'key1: value1',
     'key2: value2',
