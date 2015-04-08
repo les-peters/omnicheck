@@ -1,0 +1,3 @@
+id:      omnicheck-07
+homedir: /opt/omnicheck
+logdir:  /opt/not_there

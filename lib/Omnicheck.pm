@@ -211,6 +211,7 @@ sub _open_logs {
             $logdir,
             $self->{'config_data'}->{'main'}->{'id'}) . ".out";
 
+        $self->_log("stdout_filename");
         if (-e $stdout_filename && ! -w $stdout_filename) {
             $self->_err("stdout file $stdout_filename not writable by user");
             return "stdout file $stdout_filename not writable by user";
@@ -220,6 +221,7 @@ sub _open_logs {
             $logdir,
             $self->{'config_data'}->{'main'}->{'id'}) . ".err";
 
+        $self->_log("stderr_filename");
         if (-e $stdout_filename && ! -w $stderr_filename) {
             $self->_err("stderr file $stderr_filename not writable by user");
             return "stderr file $stderr_filename not writable by user";
@@ -228,10 +230,14 @@ sub _open_logs {
         $self->_close_logs();
 
         # make sure files can be opened by user
-        if (! open($self->{'_OUT_fh'}, ">> $stderr_filename")) {
-
+        if (! open($self->{'_OUT_fh'}, ">> $stdout_filename")) {
+            return "stdout file $stdout_filename open fail";
         }
-        open($self->{'_ERR_fh'}, ">> $stderr_filename") or croak "2";
+
+        # make sure files can be opened by user
+        if (! open($self->{'_ERR_fh'}, ">> $stderr_filename")) {
+            return "stderr file $stderr_filename open fail";
+        }
 
         select( ( select( $self->{'_OUT_fh'} ), $| = 1 )[0] );
         select( ( select( $self->{'_ERR_fh'} ), $| = 1 )[0] );

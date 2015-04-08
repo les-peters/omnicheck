@@ -1,0 +1,4 @@
+id:      omnicheck-08
+homedir: /opt/omnicheck
+# cannot write to /
+logdir:  /

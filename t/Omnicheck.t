@@ -58,3 +58,13 @@ ok($o_07->go(), qr/directory \S+ does not exist/);
 
 my $o_08 = new Omnicheck('./08config');
 ok($o_08->go(), qr/directory \S+ not writable by user/);
+
+my $o_09 = new Omnicheck('./09config');
+ok($o_09->go(), qr/stdout file \S+ not writable by user/);
+
+my $o_10 = new Omnicheck('./10config');
+ok($o_10->go(), qr/stderr file \S+ not writable by user/);
+
+
+
+__END__
