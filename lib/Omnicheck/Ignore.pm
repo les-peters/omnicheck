@@ -12,8 +12,12 @@ $VERSION = '0.01';
 @EXPORT_OK   = qw();
 %EXPORT_TAGS = ( );
 
+sub register {
+    my ($self) = @_;
+    $self->_add_action_entry('ignore');
 
-
+    return $self;
+}
 
 1;
 

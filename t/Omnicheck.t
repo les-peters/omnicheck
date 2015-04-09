@@ -3,6 +3,7 @@
 use lib "../lib";
 use strict;
 use warnings;
+use Data::Dumper;
 
 use Test::More 'no_plan';
 
@@ -65,6 +66,17 @@ ok($o_09->go(), qr/stdout file \S+ not writable by user/);
 my $o_10 = new Omnicheck('./10config');
 ok($o_10->go(), qr/stderr file \S+ not writable by user/);
 
+use_ok( 'Omnicheck::File'   );
+use_ok( 'Omnicheck::Ignore' );
 
+my $o_11 = new Omnicheck('./11config');
+Omnicheck::File::register($o_11);
+Omnicheck::Ignore::register($o_11);
+ok($o_11->go(), qr/configuration not ok/);
+
+my $o_12 = new Omnicheck('./12config');
+Omnicheck::File::register($o_12);
+Omnicheck::Ignore::register($o_12);
+ok($o_12->go());
 
 __END__

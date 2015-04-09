@@ -76,7 +76,7 @@ sub _add_mandatory_main_entry {
 
 sub _add_mandatory_perstanza_entry {
     my ($self, $entry_key) = @_;
-    $self->{'_mandatory_main_entries'}->{$entry_key}++;
+    $self->{'_mandatory_perstanza_entries'}->{$entry_key}++;
     return $self;
 }
 
@@ -155,7 +155,12 @@ sub _parse_config_data {
 
     my $config_stanza = 'main';
     for my $config_file_line (@{$self->{'config_file_data'}}) {
+        next if $config_file_line =~ /^\s*$/;
         my ($key, $value) = split(/: +/, $config_file_line, 2);
+        if ($key eq "block") {
+            $config_stanza = $value; 
+            next;
+        }
         $self->{'config_data'} ||= {};
         $self->{'config_data'}->{$config_stanza} ||= {};
         $self->{'config_data'}->{$config_stanza}->{$key} = $value;
@@ -179,8 +184,12 @@ sub _parse_config_data {
         }
     }
 
-    $self->{'_CONFIG_OK'} = "ok" if $config_ok;
-    return $self;
+    if ($config_ok) {
+        $self->{'_CONFIG_OK'} = "ok";
+        return $self;
+    } else {
+        return "configuration not ok";
+    }
 }
 
 sub _open_logs {
@@ -200,6 +209,7 @@ sub _open_logs {
     } else {
         $tmpdir = "/tmp";
     }
+    $self->{'_TMPDIR'} = $tmpdir;
 
     if (defined($self->{'_CONFIG_OK'})) {
 
@@ -226,7 +236,6 @@ sub _open_logs {
             $logdir,
             $self->{'config_data'}->{'main'}->{'id'}) . ".out";
 
-        $self->_log("stdout_filename");
         if (-e $stdout_filename && ! -w $stdout_filename) {
             $self->_err("stdout file $stdout_filename not writable by user");
             return "stdout file $stdout_filename not writable by user";
@@ -236,7 +245,6 @@ sub _open_logs {
             $logdir,
             $self->{'config_data'}->{'main'}->{'id'}) . ".err";
 
-        $self->_log("stderr_filename");
         if (-e $stdout_filename && ! -w $stderr_filename) {
             $self->_err("stderr file $stderr_filename not writable by user");
             return "stderr file $stderr_filename not writable by user";
@@ -244,12 +252,10 @@ sub _open_logs {
 
         $self->_close_logs();
 
-        # make sure files can be opened by user
         if (! open($self->{'_OUT_fh'}, ">> $stdout_filename")) {
             return "stdout file $stdout_filename open fail";
         }
 
-        # make sure files can be opened by user
         if (! open($self->{'_ERR_fh'}, ">> $stderr_filename")) {
             return "stderr file $stderr_filename open fail";
         }
@@ -287,8 +293,8 @@ sub _open_logs {
 
         # make sure files can be opened by user
 
-        open($self->{'_OUT_fh'}, ">> $stdout_filename") or croak "3";
-        open($self->{'_ERR_fh'}, ">> $stderr_filename") or croak "4";
+        open($self->{'_OUT_fh'}, "> $stdout_filename") or croak "3";
+        open($self->{'_ERR_fh'}, "> $stderr_filename") or croak "4";
 
         select( ( select( $self->{'_OUT_fh'} ), $| = 1 )[0] );
         select( ( select( $self->{'_ERR_fh'} ), $| = 1 )[0] );
@@ -329,23 +335,48 @@ sub _create_timestamp {
    return $timestamp;
 }
 
+sub _get_file_checkpoints {
+    my ($self) = @_;
+    # read checkpoint data from file into $self
+    my $checkpoint_filename = join("/",
+        $self->{'_TMPDIR'},
+        $self->{'config_data'}->{'main'}->{'id'}) . ".ckpt";
+
+    return;
+}
+
+sub _update_file_checkpoints {
+    my ($self) = @_;
+    # write checkpoint data from $self into file
+
+    return;
+}
+
 sub go {
     my ($self) = @_;
-    my $rc = $self->_open_logs();
+    my $rc;
+    $rc = $self->_open_logs();
     return $rc if $rc;
     if (! defined($self->{'config_file_data'})) {
         $self->_err("cannot go without configuration data");
         return "cannot go without configuration data";
     } else {
-        $self->_parse_config_data();
+        $rc = $self->_parse_config_data();
+        return $rc if $rc;
         if (! defined($self->{'_CONFIG_OK'})) {
             $self->_err("configuration data missing mandatory item(s)");
             return "configuration data missing mandatory item(s)";
         }
-        my $rc = $self->_open_logs();
+        $rc = $self->_open_logs();
         return $rc if $rc;
         do {
-    
+            $self->_get_file_checkpoints();
+            for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+                $self->_get_new_data($stanza) && $self->_analyze_data($stanza);
+            #   determine if there is data to analyze
+            #   analyze data
+            }
+            $self->_update_file_checkpoints();
         } while $self->{'_PERSISTENT'};
     }
     $self->_close_logs();
