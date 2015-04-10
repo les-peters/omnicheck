@@ -3032,9 +3032,7 @@ sub open_logs {
 
         &debug( $block, 'debug', 'actual logfiles opened' );
 
-    }
-    else {
-
+    } else {
         if ( !open( ERR, "> $temp_directory${dir_sep}omnicheck_$$.err" ) ) {
             printf STDERR "tmp .err broken: $!\n";
         }

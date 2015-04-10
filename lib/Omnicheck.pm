@@ -316,14 +316,16 @@ sub _close_logs {
 sub _log {
     my ($self, $message) = @_;
     my $timestamp = _create_timestamp();
-    print { $self->{'_OUT_fh'} } "$timestamp $message\n";
+    my $id = $self->{'config_data'}->{'main'}->{'id'} || "unknown";
+    print { $self->{'_OUT_fh'} } "$timestamp [$id] $message\n";
     return;
 }
 
 sub _err {
     my ($self, $message) = @_;
     my $timestamp = _create_timestamp();
-    print { $self->{'_ERR_fh'} } "$timestamp $message\n";
+    my $id = $self->{'config_data'}->{'main'}->{'id'} || "unknown";
+    print { $self->{'_ERR_fh'} } "$timestamp [$id] $message\n";
     return;
 }
 
@@ -337,10 +339,33 @@ sub _create_timestamp {
 
 sub _get_file_checkpoints {
     my ($self) = @_;
-    # read checkpoint data from file into $self
     my $checkpoint_filename = join("/",
         $self->{'_TMPDIR'},
         $self->{'config_data'}->{'main'}->{'id'}) . ".ckpt";
+    if (! -e $checkpoint_filename) {
+        $self->_log("checkpoint file $checkpoint_filename not found");
+        return;
+    }
+    if (! -r $checkpoint_filename) {
+        $self->_err('checkpoint file cannot be read by user');
+        return;
+    }
+    my $checkpoint_entries = 0;
+    if (-e $checkpoint_filename && -r $checkpoint_filename) {
+        open(CKPT, "< $checkpoint_filename") or croak;
+        $self->_log('checkpoint file opened');
+        while(<CKPT>) {
+            chomp;
+            my ($block, $monitored_file, $checkpoint) = split(/\t/);
+            $self->{'_checkpoint_data'}                              ||= {};
+            $self->{'_checkpoint_data'}->{$block}                    ||= {};
+            $self->{'_checkpoint_data'}->{$block}->{$monitored_file}   = $checkpoint;
+            $checkpoint_entries++;
+        }
+        close(CKPT);
+    }
+    my $msg = sprintf "read %d checkpoint entries", $checkpoint_entries;
+    $self->_log($msg);
 
     return;
 }
@@ -362,7 +387,6 @@ sub go {
         return "cannot go without configuration data";
     } else {
         $rc = $self->_parse_config_data();
-        return $rc if $rc;
         if (! defined($self->{'_CONFIG_OK'})) {
             $self->_err("configuration data missing mandatory item(s)");
             return "configuration data missing mandatory item(s)";
@@ -371,12 +395,12 @@ sub go {
         return $rc if $rc;
         do {
             $self->_get_file_checkpoints();
-            for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
-                $self->_get_new_data($stanza) && $self->_analyze_data($stanza);
+            #for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+            #    $self->_get_new_data($stanza) && $self->_analyze_data($stanza);
             #   determine if there is data to analyze
             #   analyze data
-            }
-            $self->_update_file_checkpoints();
+            #}
+            #$self->_update_file_checkpoints();
         } while $self->{'_PERSISTENT'};
     }
     $self->_close_logs();

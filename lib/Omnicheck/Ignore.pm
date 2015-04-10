@@ -19,6 +19,13 @@ sub register {
     return $self;
 }
 
+sub ignore {
+    my ($self) = @_;
+
+
+    return;
+}
+
 1;
 
 __DATA__

@@ -77,6 +77,12 @@ ok($o_11->go(), qr/configuration not ok/);
 my $o_12 = new Omnicheck('./12config');
 Omnicheck::File::register($o_12);
 Omnicheck::Ignore::register($o_12);
-ok($o_12->go());
+$o_12->go();
+
+my $o_13 = new Omnicheck('./13config');
+Omnicheck::File::register($o_13);
+Omnicheck::Ignore::register($o_13);
+$o_13->go();
+print Dumper($o_13);
 
 __END__
