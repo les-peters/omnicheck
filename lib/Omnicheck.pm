@@ -339,6 +339,7 @@ sub _create_timestamp {
 
 sub _get_file_checkpoints {
     my ($self) = @_;
+
     my $checkpoint_filename = join("/",
         $self->{'_TMPDIR'},
         $self->{'config_data'}->{'main'}->{'id'}) . ".ckpt";
@@ -353,7 +354,7 @@ sub _get_file_checkpoints {
     my $checkpoint_entries = 0;
     if (-e $checkpoint_filename && -r $checkpoint_filename) {
         open(CKPT, "< $checkpoint_filename") or croak;
-        $self->_log('checkpoint file opened');
+        $self->_log('checkpoint file opened for reading');
         while(<CKPT>) {
             chomp;
             my ($block, $monitored_file, $checkpoint) = split(/\t/);
@@ -370,9 +371,50 @@ sub _get_file_checkpoints {
     return;
 }
 
+###
+
 sub _update_file_checkpoints {
     my ($self) = @_;
-    # write checkpoint data from $self into file
+
+    my $checkpoint_filename = join("/",
+        $self->{'_TMPDIR'},
+        $self->{'config_data'}->{'main'}->{'id'}) . ".ckpt";
+    my $temp_checkpoint_filename = $checkpoint_filename . ".tmp";
+
+    if (! -e $checkpoint_filename) {
+        $self->_log("checkpoint file $checkpoint_filename not found: must create");
+    } elsif (! -w $checkpoint_filename) {
+        $self->_err('checkpoint file cannot be read by user');
+        return;
+    }
+
+    my $checkpoint_entries = 0;
+    open(CKPT, "> $temp_checkpoint_filename") or croak;
+    $self->_log('temp checkpoint file opened for writing');
+
+    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+        for my $monitored_file (sort keys %{$self->{'_checkpoint_data'}->{$stanza}}) {
+            my $checkpoint = (stat($monitored_file))[7];
+            printf CKPT "%s\t%s\t%d\n",
+                $stanza,
+                $monitored_file,
+                $checkpoint;
+            $checkpoint_entries++;
+        }
+    }
+    close(CKPT);
+
+    if (! unlink($checkpoint_filename)) {
+        $self->_err('checkpoint file cannot be deleted by user');
+        return;
+    }
+    if (! rename($temp_checkpoint_filename, $checkpoint_filename) ) {
+        $self->_err('temp checkpoint file cannot be renamed by user');
+        return;
+    }
+
+    my $msg = sprintf "wrote %d checkpoint entries", $checkpoint_entries;
+    $self->_log($msg);
 
     return;
 }
@@ -400,7 +442,7 @@ sub go {
             #   determine if there is data to analyze
             #   analyze data
             #}
-            #$self->_update_file_checkpoints();
+            $self->_update_file_checkpoints();
         } while $self->{'_PERSISTENT'};
     }
     $self->_close_logs();
