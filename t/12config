@@ -1,0 +1,6 @@
+id:      12
+homedir: /opt/omnicheck
+
+block: 1
+file:    ./12test.log
+rules:   12rules

@@ -1,0 +1,6 @@
+id:      11
+homedir: /opt/omnicheck
+logdir:  /opt/omnicheck
+
+block: 1
+file:    /var/log/

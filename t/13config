@@ -1,0 +1,6 @@
+id:      13
+homedir: /opt/omnicheck
+
+block: 1
+file:    /tmp/date.log
+rules:   13rules
