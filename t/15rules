@@ -1,0 +1,6 @@
+error
+file /tmp/error_file
+file /tmp/second_file
+
+.*
+ignore
