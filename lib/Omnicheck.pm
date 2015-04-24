@@ -20,6 +20,7 @@ our %EXPORT_TAGS = ( 'all' => [ qw(
     _add_action_entry
     _add_mandatory_main_entry
     _add_mandatory_perstanza_entry
+    _add_mandatory_peraction_entry
     _open_logs
     _close_logs
     _log
@@ -47,6 +48,7 @@ sub new {
     $self->{'_actions'}                     = {};
     $self->{'_mandatory_main_entries'}      = {};
     $self->{'_mandatory_perstanza_entries'} = {};
+    $self->{'_mandatory_peraction_entries'} = {};
 
     $self->_add_mandatory_main_entry('id');
     $self->_add_mandatory_main_entry('homedir');
@@ -54,7 +56,6 @@ sub new {
     $self->_add_mandatory_perstanza_entry('file');
     $self->_add_mandatory_perstanza_entry('rules');
 
-    # load configuration file if present
     if ($config_filename) {
         $self->_read_config_file($config_filename);
     }
@@ -77,6 +78,12 @@ sub _add_mandatory_main_entry {
 sub _add_mandatory_perstanza_entry {
     my ($self, $entry_key) = @_;
     $self->{'_mandatory_perstanza_entries'}->{$entry_key}++;
+    return $self;
+}
+
+sub _add_mandatory_peraction_entry {
+    my ($self, $entry_key) = @_;
+    $self->{'_mandatory_peraction_entries'}->{$entry_key}++;
     return $self;
 }
 
@@ -172,6 +179,83 @@ sub _parse_config_data {
         if (! defined($self->{'config_data'}->{'main'}->{$mandatory_main_entry})) {
             $config_ok = 0;
             last;
+        }
+    }
+
+    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+        for my $mandatory_perstanza_entry (sort keys %{$self->{'_mandatory_perstanza_entries'}}) {
+            if (! defined($self->{'config_data'}->{$stanza}->{$mandatory_perstanza_entry})) {
+                $config_ok = 0;
+                last;
+            }
+        }
+    }
+
+    # need to read the rules files and make sure that any action-based config entries are present
+
+    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+        $self->{'rule_data'}->{$stanza} ||= [];
+        if (defined($self->{'config_data'}->{$stanza}->{'rules'})) {
+            my $rule_files = $self->{'config_data'}->{$stanza}->{'rules'};
+            for my $rule_file (split(/[\s,]/, $rule_files)) {
+                my $full_rule_filename = join("/",
+                    $self->{'config_data'}->{'main'}->{'homedir'}, 
+                    $rule_file);
+                if (! -e $full_rule_filename) {
+                    $self->_err("rule file $rule_file does not exist");
+                    return 1;
+                }
+                if (! -r $full_rule_filename) {
+                    $self->_err("rule file $rule_file cannot be read by user");
+                    return 2;
+                }
+                my $rule_state = 0;
+                my $rule_hash = {};
+                open(RULE, "< $full_rule_filename");
+                while(<RULE>) {
+                    chomp;
+                    if ($rule_state == 0) {
+                        next if /(^\s*$|^#)/;
+                        $rule_hash->{'pattern'} = $_;
+                        $rule_state++;
+                        next;
+                    }
+
+                    if ($rule_state == 1) {
+                        next if /^#/;
+                        if (/^(
+                                \.\.\. |
+                                &&     |
+                                \|\|   |
+                                \+\d+  )
+                            \s+
+                            (.*)
+                            $/x) {
+                            $rule_hash->{'pattern'} .= " $1 $2";
+                            next;
+                        }
+                        if (/^\s*$/) {
+                            if (scalar @{$rule_hash->{'actions'}} == 0) {
+                                $self->_err('found rule with no actions; discarding');
+                            } else {
+                                push @{$self->{'rule_data'}->{$stanza}}, $rule_hash;
+                            }
+                            $rule_state = 0;
+                            $rule_hash = {};
+                        } else {
+                            $rule_hash->{'actions'} ||= [];
+                            push @{$rule_hash->{'actions'}}, $_;
+                        }
+                        next;
+                    }
+                }
+                close(RULE);
+                if (scalar @{$rule_hash->{'actions'}} == 0) {
+                    $self->_err('found rule with no actions; discarding');
+                } else {
+                    push @{$self->{'rule_data'}->{$stanza}}, $rule_hash;
+                }
+            }
         }
     }
 
@@ -368,10 +452,8 @@ sub _get_file_checkpoints {
     my $msg = sprintf "read %d checkpoint entries", $checkpoint_entries;
     $self->_log($msg);
 
-    return;
+    return $self;
 }
-
-###
 
 sub _update_file_checkpoints {
     my ($self) = @_;
@@ -393,12 +475,13 @@ sub _update_file_checkpoints {
     $self->_log('temp checkpoint file opened for writing');
 
     for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
-        for my $monitored_file (sort keys %{$self->{'_checkpoint_data'}->{$stanza}}) {
-            my $checkpoint = (stat($monitored_file))[7];
+        for my $monitored_file (sort keys %{$self->{'_config_data'}->{$stanza}->{'file'}}) {
+            my $checkpoint_value  = $self->{'_checkpoint_data'}->{$stanza}->{$monitored_file}
+                                 || 0;
             printf CKPT "%s\t%s\t%d\n",
                 $stanza,
                 $monitored_file,
-                $checkpoint;
+                $checkpoint_value;
             $checkpoint_entries++;
         }
     }
@@ -408,15 +491,50 @@ sub _update_file_checkpoints {
         $self->_err('checkpoint file cannot be deleted by user');
         return;
     }
+
     if (! rename($temp_checkpoint_filename, $checkpoint_filename) ) {
         $self->_err('temp checkpoint file cannot be renamed by user');
         return;
+    } else {
+        $self->_log("temp checkpoint file $temp_checkpoint_filename moved to $checkpoint_filename");
     }
 
     my $msg = sprintf "wrote %d checkpoint entries", $checkpoint_entries;
     $self->_log($msg);
 
     return;
+}
+
+sub _process_data {
+    my ($self) = @_;
+
+    $self->{'_file_data'} ||= {};
+    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+        $self->_log("process_data: stanza $stanza");
+        $self->{'_file_data'}->{$stanza} ||= {};
+        for my $monitored_file (keys %{$self->{'config_data'}->{$stanza}}) {
+            $self->_log("process_data: monitored file $monitored_file");
+            $self->{'_file_data'}->{$stanza}->{$monitored_file} ||= [];
+            # get new data, if any
+            my $previous_checkpoint = $self->{'_checkpoint_data'}->{$stanza}->{$monitored_file};
+            $self->_log("found prev checkpoint $previous_checkpoint for $monitored_file");
+            open(FILE, "< $monitored_file");
+            seek(FILE, $previous_checkpoint,0);
+            while(<FILE>) {
+                chomp;
+                push @{$self->{'_file_data'}->{$stanza}->{$monitored_file}}, $_;
+            }
+            my $updated_checkpoint = tell FILE;
+            close(FILE);
+            my $message = sprintf "found %d lines in %s",
+                scalar @{$self->{'_file_data'}->{$stanza}->{$monitored_file}}, $monitored_file;
+            $self->_log($message);
+            # analyze new data, if any    
+        }
+
+    }
+
+    return $self;
 }
 
 sub go {
@@ -437,11 +555,7 @@ sub go {
         return $rc if $rc;
         do {
             $self->_get_file_checkpoints();
-            #for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
-            #    $self->_get_new_data($stanza) && $self->_analyze_data($stanza);
-            #   determine if there is data to analyze
-            #   analyze data
-            #}
+            $self->_process_data();
             $self->_update_file_checkpoints();
         } while $self->{'_PERSISTENT'};
     }
@@ -542,6 +656,12 @@ main stanza.
 C<_add_mandatory_perstanza_entry> is the method that daughter modules can use
 to add to the list of mandatory entries for the Omnicheck configuration file
 stanzas (beyond the 'main' stanza, if present).
+
+=item _add_mandatory_peraction_entry
+
+C<_add_mandatory_peraction_entry> is the method that daughter modules can use
+to add to the list of mandatory entries for the Omnicheck configuration file
+stanzas when a particular action is used.
 
 =back
 

@@ -83,6 +83,16 @@ my $o_13 = new Omnicheck('./13config');
 Omnicheck::File::register($o_13);
 Omnicheck::Ignore::register($o_13);
 $o_13->go();
-print Dumper($o_13);
+
+my $o_14 = new Omnicheck('./14config');
+Omnicheck::File::register($o_14);
+Omnicheck::Ignore::register($o_14);
+$o_14->go();
+
+my $o_15 = new Omnicheck('./15config');
+Omnicheck::File::register($o_15);
+Omnicheck::Ignore::register($o_15);
+$o_15->go();
+print Dumper($o_15);
 
 __END__

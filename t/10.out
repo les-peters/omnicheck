@@ -1,0 +1,7 @@
+2015-04-13 10:31:47 [unknown] temporary stdout created
+2015-04-13 10:31:47 [unknown] temporary stderr created
+2015-04-13 10:31:47 [10] stdout entries migrated
+2015-04-13 10:31:47 [10] stderr entries migrated
+2015-04-13 10:31:47 [10] checkpoint file /tmp/10.ckpt not found
+2015-04-13 10:31:47 [10] checkpoint file /tmp/10.ckpt not found: must create
+2015-04-13 10:31:47 [10] temp checkpoint file opened for writing
