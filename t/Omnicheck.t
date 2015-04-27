@@ -27,9 +27,14 @@ can_ok( __PACKAGE__, '_get_config_file_mtime' );
 my $o_00 = new Omnicheck;
 isa_ok( $o_00, 'Omnicheck');
 ok($o_00->version(), '0.01');
+
+open(CFG, "> ./00config");
+print CFG "key: value\n";
+close(CFG);
 $o_00->configure('./00config');
 ok($o_00->_get_config_file_data(), 
      [ 'key: value' ]);
+unlink("./00config");
 
 my $o_02 = new Omnicheck('./02config');
 ok($o_02->_get_config_file_data(),              [ 'key: value' ]);
