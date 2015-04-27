@@ -173,6 +173,7 @@ print CFG "block: 1\n";
 print CFG "file:  ./12test.log\n";
 print CFG "rules: 12rules/\n";
 close(CFG);
+
 open(RULES, "> ./12rules");  close(RULES); chmod(0644, './12rules');
 open(LOG, "> ./12test.log"); close(LOG);   chmod(0644, './12test.log');
 my $o_12 = new Omnicheck('./12config');
@@ -183,10 +184,22 @@ unlink($config_file);
 unlink('./12test.log');
 unlink('./12rules');
 
-my $o_13 = new Omnicheck('./13config');
+$config_file = './13config';
+open(CFG, "> $config_file");
+print CFG "id: 13\n";
+print CFG "homedir: /opt/omnicheck\n";
+print CFG "\n";
+print CFG "block: 1\n";
+print CFG "file:  /tmp/date.log\n";
+print CFG "rules: 13rules/\n";
+close(CFG);
+open(RULES, "> ./13rules");  close(RULES); chmod(0644, './13rules');
+my $o_13 = new Omnicheck($config_file);
 Omnicheck::File::register($o_13);
 Omnicheck::Ignore::register($o_13);
 $o_13->go();
+unlink($config_file);
+unlink('./13rules');
 
 my $o_14 = new Omnicheck('./14config');
 Omnicheck::File::register($o_14);
