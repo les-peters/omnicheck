@@ -81,27 +81,73 @@ $config_file = './04config';
 open(CFG, "> $config_file");
 print CFG "id: omnicheck-04\n";
 print CFG "homedir: /opt/omnicheck\n";
+close(CFG);
 my $o_04 = new Omnicheck($config_file);
 $o_04->go();
 unlink($config_file);
 
-my $o_05 = new Omnicheck('./05config');
+$config_file = './05config';
+open(CFG, "> $config_file");
+print CFG "id: omnicheck-05\n";
+close(CFG);
+my $o_05 = new Omnicheck($config_file);
 ok($o_05->go(), qr/configuration data missing mandatory item\(s\)/);
+unlink($config_file);
 
 my $o_06 = new Omnicheck;
 ok($o_06->go(), qr/cannot go without configuration data/);
 
-my $o_07 = new Omnicheck('./07config');
+$config_file = './07config';
+open(CFG, "> $config_file");
+print CFG "id: omnicheck-07\n";
+print CFG "homedir: /opt/omnicheck\n";
+print CFG "logdir: /opt/not_there\n";
+close(CFG);
+my $o_07 = new Omnicheck($config_file);
 ok($o_07->go(), qr/directory \S+ does not exist/);
+unlink($config_file);
 
-my $o_08 = new Omnicheck('./08config');
+$config_file = './08config';
+open(CFG, "> $config_file");
+print CFG "id: omnicheck-08\n";
+print CFG "homedir: /opt/omnicheck\n";
+print CFG "logdir: /\n";
+close(CFG);
+my $o_08 = new Omnicheck($config_file);
 ok($o_08->go(), qr/directory \S+ not writable by user/);
+unlink($config_file);
 
-my $o_09 = new Omnicheck('./09config');
+$config_file = './09config';
+open(CFG, "> $config_file");
+print CFG "id: 09\n";
+print CFG "homedir: /opt/omnicheck\n";
+print CFG "logdir: .\n";
+close(CFG);
+open(OUT, "> ./09.out"); close(OUT);
+chmod(0444, './09.out');
+open(ERR, "> ./09.err"); close(ERR);
+chmod(0644, './09.err');
+my $o_09 = new Omnicheck($config_file);
 ok($o_09->go(), qr/stdout file \S+ not writable by user/);
+unlink($config_file);
+unlink('./09.out');
+unlink('./09.err');
 
+$config_file = './10config';
+open(CFG, "> $config_file");
+print CFG "id: 10\n";
+print CFG "homedir: /opt/omnicheck\n";
+print CFG "logdir: .\n";
+close(CFG);
+open(OUT, "> ./10.out"); close(OUT);
+chmod(0644, './10.out');
+open(ERR, "> ./10.err"); close(ERR);
+chmod(0444, './10.err');
 my $o_10 = new Omnicheck('./10config');
 ok($o_10->go(), qr/stderr file \S+ not writable by user/);
+unlink($config_file);
+unlink('./10.out');
+unlink('./10.err');
 
 use_ok( 'Omnicheck::File'   );
 use_ok( 'Omnicheck::Ignore' );
