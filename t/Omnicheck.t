@@ -245,10 +245,34 @@ unlink('./14rules');
 unlink('./14.out');
 unlink('./14.err');
 
-my $o_15 = new Omnicheck('./15config');
+$config_file = './15config';
+open(CFG, "> $config_file");
+print CFG "id: 15\n";
+print CFG "homedir: .\n";
+print CFG "\n";
+print CFG "block: 1\n";
+print CFG "file:  /tmp/date.log\n";
+print CFG "rules: 15rules/\n";
+close(CFG);
+
+open(RULES, "> ./15rules");
+print RULES "error\n";
+print RULES "file /tmp/error_file\n";
+print RULES "file /tmp/second_file\n";
+print RULES "\n";
+print RULES ".*\n";
+print RULES "ignore\n";
+close(RULES);
+
+my $o_15 = new Omnicheck($config_file);
 Omnicheck::File::register($o_15);
 Omnicheck::Ignore::register($o_15);
 $o_15->go();
+unlink($config_file);
+unlink('./15rules');
+unlink('./15.out');
+unlink('./15.err');
 print Dumper($o_15);
+
 
 __END__
