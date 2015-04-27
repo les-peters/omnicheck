@@ -77,8 +77,13 @@ unlink($config_file);
 unlink("${config_file}.incl_file");
 unlink("${config_file}.incl_script");
 
-my $o_04 = new Omnicheck('./04config');
+$config_file = './04config';
+open(CFG, "> $config_file");
+print CFG "id: omnicheck-04\n";
+print CFG "homedir: /opt/omnicheck\n";
+my $o_04 = new Omnicheck($config_file);
 $o_04->go();
+unlink($config_file);
 
 my $o_05 = new Omnicheck('./05config');
 ok($o_05->go(), qr/configuration data missing mandatory item\(s\)/);
