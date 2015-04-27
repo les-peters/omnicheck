@@ -36,9 +36,14 @@ ok($o_00->_get_config_file_data(),
      [ 'key: value' ]);
 unlink("./00config");
 
+open(CFG, "> ./02config");
+print CFG "id: omnicheck\n";
+print CFG "homedir: /opt/omnicheck\n";
+close(CFG);
 my $o_02 = new Omnicheck('./02config');
 ok($o_02->_get_config_file_data(),              [ 'key: value' ]);
 ok($o_02->_get_config_file_mtime('./02config'), qr/^d+$/);
+unlink("./02config");
 
 my $o_03 = new Omnicheck('./03config');
 my $o_03_config_data = $o_03->_get_config_file_data();
