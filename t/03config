@@ -1,3 +1,0 @@
-key1: value1
-#include  ./03config.incl_file
-#!include ./03config.incl_script
