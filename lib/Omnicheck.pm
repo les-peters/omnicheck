@@ -168,23 +168,30 @@ sub _parse_config_data {
             $config_stanza = $value; 
             next;
         }
-        $self->{'config_data'} ||= {};
-        $self->{'config_data'}->{$config_stanza} ||= {};
-        $self->{'config_data'}->{$config_stanza}->{$key} = $value;
+        $self->{'_config_data'} ||= {};
+        $self->{'_config_data'}->{$config_stanza} ||= {};
+        if ($key eq 'file') {
+            $self->{'_config_data'}->{$config_stanza}->{$key} ||= [];
+            for my $v (split(/\s+/, $value)) {
+                push @{$self->{'_config_data'}->{$config_stanza}->{$key}}, $v;
+            }
+        } else {
+            $self->{'_config_data'}->{$config_stanza}->{$key} = $value;
+        }
     }
 
     my $config_ok = 1;
 
     for my $mandatory_main_entry (sort keys %{$self->{'_mandatory_main_entries'}}) {
-        if (! defined($self->{'config_data'}->{'main'}->{$mandatory_main_entry})) {
+        if (! defined($self->{'_config_data'}->{'main'}->{$mandatory_main_entry})) {
             $config_ok = 0;
             last;
         }
     }
 
-    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+    for my $stanza (grep(!/main/, sort keys %{$self->{'_config_data'}})) {
         for my $mandatory_perstanza_entry (sort keys %{$self->{'_mandatory_perstanza_entries'}}) {
-            if (! defined($self->{'config_data'}->{$stanza}->{$mandatory_perstanza_entry})) {
+            if (! defined($self->{'_config_data'}->{$stanza}->{$mandatory_perstanza_entry})) {
                 $config_ok = 0;
                 last;
             }
@@ -193,13 +200,13 @@ sub _parse_config_data {
 
     # need to read the rules files and make sure that any action-based config entries are present
 
-    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+    for my $stanza (grep(!/main/, sort keys %{$self->{'_config_data'}})) {
         $self->{'rule_data'}->{$stanza} ||= [];
-        if (defined($self->{'config_data'}->{$stanza}->{'rules'})) {
-            my $rule_files = $self->{'config_data'}->{$stanza}->{'rules'};
+        if (defined($self->{'_config_data'}->{$stanza}->{'rules'})) {
+            my $rule_files = $self->{'_config_data'}->{$stanza}->{'rules'};
             for my $rule_file (split(/[\s,]/, $rule_files)) {
                 my $full_rule_filename = join("/",
-                    $self->{'config_data'}->{'main'}->{'homedir'}, 
+                    $self->{'_config_data'}->{'main'}->{'homedir'}, 
                     $rule_file);
                 if (! -e $full_rule_filename) {
                     $self->_err("rule file $rule_file does not exist");
@@ -259,9 +266,9 @@ sub _parse_config_data {
         }
     }
 
-    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
+    for my $stanza (grep(!/main/, sort keys %{$self->{'_config_data'}})) {
         for my $mandatory_perstanza_entry (sort keys %{$self->{'_mandatory_perstanza_entries'}}) {
-            if (! defined($self->{'config_data'}->{$stanza}->{$mandatory_perstanza_entry})) {
+            if (! defined($self->{'_config_data'}->{$stanza}->{$mandatory_perstanza_entry})) {
                 $config_ok = 0;
                 last;
             }
@@ -279,7 +286,8 @@ sub _parse_config_data {
 sub _open_logs {
     my ($self) = @_;
 
-    # establish temporary directory for log files until configuration file data is processed
+    # establish temporary directory for log files until configuration file 
+    #   data is processed
 
     my $tmpdir;
     if ($^O =~ m/win32/i) {
@@ -297,13 +305,14 @@ sub _open_logs {
 
     if (defined($self->{'_CONFIG_OK'})) {
 
-        # if configuration file data has been processed, migrate logs to proper directory    
+        # if configuration file data has been processed, migrate logs to 
+        #   proper directory    
 
         my $logdir;
-        if (defined($self->{'config_data'}->{'main'}->{'logdir'})) {
-            $logdir = $self->{'config_data'}->{'main'}->{'logdir'};
+        if (defined($self->{'_config_data'}->{'main'}->{'logdir'})) {
+            $logdir = $self->{'_config_data'}->{'main'}->{'logdir'};
         } else {
-            $logdir = $self->{'config_data'}->{'main'}->{'homedir'};
+            $logdir = $self->{'_config_data'}->{'main'}->{'homedir'};
         }
 
         if (! -d $logdir)  {
@@ -318,7 +327,7 @@ sub _open_logs {
 
         my $stdout_filename = join("/", 
             $logdir,
-            $self->{'config_data'}->{'main'}->{'id'}) . ".out";
+            $self->{'_config_data'}->{'main'}->{'id'}) . ".out";
 
         if (-e $stdout_filename && ! -w $stdout_filename) {
             $self->_err("stdout file $stdout_filename not writable by user");
@@ -327,7 +336,7 @@ sub _open_logs {
 
         my $stderr_filename = join("/", 
             $logdir,
-            $self->{'config_data'}->{'main'}->{'id'}) . ".err";
+            $self->{'_config_data'}->{'main'}->{'id'}) . ".err";
 
         if (-e $stdout_filename && ! -w $stderr_filename) {
             $self->_err("stderr file $stderr_filename not writable by user");
@@ -349,7 +358,9 @@ sub _open_logs {
 
         # copy temporary log entries to permanent log files
 
-        open(TMP, "< $tmpdir/omnicheck.out");
+        if (! open(TMP, "< $tmpdir/omnicheck.out")) {
+            return "cannot read $tmpdir/omnicheck.out";
+        }
         while(<TMP>) {
             chomp;
             print { $self->{'_OUT_fh'} } "$_\n";
@@ -358,7 +369,9 @@ sub _open_logs {
         unlink("$tmpdir/omnicheck.out");
         $self->_log('stdout entries migrated');
 
-        open(TMP, "< $tmpdir/omnicheck.err");
+        if (! open(TMP, "< $tmpdir/omnicheck.err")) {
+            return "cannot read $tmpdir/omnicheck.err";
+        }
         while(<TMP>) {
             chomp;
             print { $self->{'_ERR_fh'} } "$_\n";
@@ -400,16 +413,28 @@ sub _close_logs {
 sub _log {
     my ($self, $message) = @_;
     my $timestamp = _create_timestamp();
-    my $id = $self->{'config_data'}->{'main'}->{'id'} || "unknown";
-    print { $self->{'_OUT_fh'} } "$timestamp [$id] $message\n";
+
+    my ($called_sub) = ( caller(1) )[3] || "";
+    $called_sub =~ s/^.[^:]+:://x;
+    my ($called_line) = ( caller(0) )[2];
+
+    my $id = $self->{'_config_data'}->{'main'}->{'id'} || "unknown";
+    print { $self->{'_OUT_fh'} } 
+        "$timestamp [$id] $called_sub:$called_line $message\n";
     return;
 }
 
 sub _err {
     my ($self, $message) = @_;
     my $timestamp = _create_timestamp();
-    my $id = $self->{'config_data'}->{'main'}->{'id'} || "unknown";
-    print { $self->{'_ERR_fh'} } "$timestamp [$id] $message\n";
+
+    my ($called_sub) = ( caller(2) )[3] || "";
+    $called_sub =~ s/^.[^:]+:://x;
+    my ($called_line) = ( caller(1) )[2];
+
+    my $id = $self->{'_config_data'}->{'main'}->{'id'} || "unknown";
+    print { $self->{'_ERR_fh'} } 
+        "$timestamp [$id] $called_sub:$called_line $message\n";
     return;
 }
 
@@ -426,7 +451,7 @@ sub _get_file_checkpoints {
 
     my $checkpoint_filename = join("/",
         $self->{'_TMPDIR'},
-        $self->{'config_data'}->{'main'}->{'id'}) . ".ckpt";
+        $self->{'_config_data'}->{'main'}->{'id'}) . ".ckpt";
     if (! -e $checkpoint_filename) {
         $self->_log("checkpoint file $checkpoint_filename not found");
         return;
@@ -441,10 +466,10 @@ sub _get_file_checkpoints {
         $self->_log('checkpoint file opened for reading');
         while(<CKPT>) {
             chomp;
-            my ($block, $monitored_file, $checkpoint) = split(/\t/);
+            my ($stanza, $monitored_file, $checkpoint) = split(/\t/);
             $self->{'_checkpoint_data'}                              ||= {};
-            $self->{'_checkpoint_data'}->{$block}                    ||= {};
-            $self->{'_checkpoint_data'}->{$block}->{$monitored_file}   = $checkpoint;
+            $self->{'_checkpoint_data'}->{$stanza}                   ||= {};
+            $self->{'_checkpoint_data'}->{$stanza}->{$monitored_file}  = $checkpoint;
             $checkpoint_entries++;
         }
         close(CKPT);
@@ -460,7 +485,7 @@ sub _update_file_checkpoints {
 
     my $checkpoint_filename = join("/",
         $self->{'_TMPDIR'},
-        $self->{'config_data'}->{'main'}->{'id'}) . ".ckpt";
+        $self->{'_config_data'}->{'main'}->{'id'}) . ".ckpt";
     my $temp_checkpoint_filename = $checkpoint_filename . ".tmp";
 
     if (! -e $checkpoint_filename) {
@@ -473,11 +498,13 @@ sub _update_file_checkpoints {
     my $checkpoint_entries = 0;
     open(CKPT, "> $temp_checkpoint_filename") or croak;
     $self->_log('temp checkpoint file opened for writing');
-
-    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
-        for my $monitored_file (sort keys %{$self->{'_config_data'}->{$stanza}->{'file'}}) {
-            my $checkpoint_value  = $self->{'_checkpoint_data'}->{$stanza}->{$monitored_file}
-                                 || 0;
+    for my $stanza (grep(!/main/, sort keys %{$self->{'_config_data'}})) {
+        $self->_log("stanza $stanza");
+        for my $monitored_file (@{$self->{'_config_data'}->{$stanza}->{'file'}}) {
+            $self->_log("monitored_file $monitored_file");
+            my $checkpoint_value  = 
+                $self->{'_checkpoint_data'}->{$stanza}->{$monitored_file};
+            $self->_log("ckpt $checkpoint_value");
             printf CKPT "%s\t%s\t%d\n",
                 $stanza,
                 $monitored_file,
@@ -502,34 +529,51 @@ sub _update_file_checkpoints {
     my $msg = sprintf "wrote %d checkpoint entries", $checkpoint_entries;
     $self->_log($msg);
 
-    return;
+    return $msg;
 }
 
 sub _process_data {
     my ($self) = @_;
 
     $self->{'_file_data'} ||= {};
-    for my $stanza (grep(!/main/, sort keys %{$self->{'config_data'}})) {
-        $self->_log("process_data: stanza $stanza");
+    for my $stanza (grep(!/main/, sort keys %{$self->{'_config_data'}})) {
+        $self->_log("stanza $stanza");
         $self->{'_file_data'}->{$stanza} ||= {};
-        for my $monitored_file (keys %{$self->{'config_data'}->{$stanza}}) {
-            $self->_log("process_data: monitored file $monitored_file");
+        for my $monitored_file (@{$self->{'_config_data'}->{$stanza}->{'file'}}) {
+            $self->_log("monitored file $monitored_file");
             $self->{'_file_data'}->{$stanza}->{$monitored_file} ||= [];
             # get new data, if any
-            my $previous_checkpoint = $self->{'_checkpoint_data'}->{$stanza}->{$monitored_file};
+            my $previous_checkpoint = 
+                $self->{'_checkpoint_data'}->{$stanza}->{$monitored_file} || 0;
             $self->_log("found prev checkpoint $previous_checkpoint for $monitored_file");
-            open(FILE, "< $monitored_file");
-            seek(FILE, $previous_checkpoint,0);
-            while(<FILE>) {
+            if (! open(DATA, "< $monitored_file")) {
+                $self->_err("cannot open $monitored_file for reading");
+                return;
+            } else {
+                $self->_log("opened $monitored_file for reading");
+            }
+            if (-s DATA < $previous_checkpoint) {
+                $self->_log("rolled checkpoint on $monitored_file to 0");
+                $previous_checkpoint = 0;
+            }
+            seek(DATA, $previous_checkpoint, 0);
+            while(<DATA>) {
                 chomp;
                 push @{$self->{'_file_data'}->{$stanza}->{$monitored_file}}, $_;
             }
-            my $updated_checkpoint = tell FILE;
-            close(FILE);
+            my $tell = tell DATA;
+            $self->_log("tell $tell");
+            $self->{'_checkpoint_data'}->{$stanza}->{$monitored_file} = $tell;
+            close(DATA);
             my $message = sprintf "found %d lines in %s",
-                scalar @{$self->{'_file_data'}->{$stanza}->{$monitored_file}}, $monitored_file;
+                scalar @{$self->{'_file_data'}->{$stanza}->{$monitored_file}}, 
+                $monitored_file;
             $self->_log($message);
-            # analyze new data, if any    
+            # analyze new data, if any
+            for my $data (@{$self->{'_file_data'}->{$stanza}->{$monitored_file}}) {
+                $self->_log("data $data");
+            }
+
         }
 
     }
@@ -556,7 +600,8 @@ sub go {
         do {
             $self->_get_file_checkpoints();
             $self->_process_data();
-            $self->_update_file_checkpoints();
+            $rc = $self->_update_file_checkpoints();
+            return $rc if $rc;
         } while $self->{'_PERSISTENT'};
     }
     $self->_close_logs();

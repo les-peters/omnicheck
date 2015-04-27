@@ -170,7 +170,7 @@ print CFG "id: 12\n";
 print CFG "homedir: /opt/omnicheck\n";
 print CFG "\n";
 print CFG "block: 1\n";
-print CFG "file:  ./12test.log\n";
+print CFG "file:  ./12test.log ./12test.log2\n";
 print CFG "rules: 12rules/\n";
 close(CFG);
 
@@ -272,7 +272,42 @@ unlink($config_file);
 unlink('./15rules');
 unlink('./15.out');
 unlink('./15.err');
-print Dumper($o_15);
 
+$config_file = './16config';
+open(CFG, "> $config_file");
+print CFG "id: 16\n";
+print CFG "homedir: .\n";
+print CFG "\n";
+print CFG "block: 1\n";
+print CFG "file:  ./16test.file\n";
+print CFG "rules: 16rules\n";
+close(CFG);
+
+open(RULES, "> ./16rules");
+print RULES ".*\n";
+print RULES "ignore\n";
+close(RULES);
+
+open(FILE, "> ./16test.file");
+print FILE "abcdefghi\n";
+close(FILE);
+system('cat ./16test.file');
+
+my $o = new Omnicheck($config_file);
+Omnicheck::Ignore::register($o);
+ok($o->go(), qr/wrote 1 checkpoint entries/);
+
+open(FILE, ">> ./16test.file") or die;
+print FILE "abcdefghi\n";
+close(FILE);
+system('cat ./16test.file');
+
+ok($o->go(), qr/wrote 1 checkpoint entries/);
+
+unlink($config_file);
+unlink('./16rules');
+system('cat ./16.out');
+unlink('./16.out');
+unlink('./16.err');
 
 __END__
