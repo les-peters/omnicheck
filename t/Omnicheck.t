@@ -193,6 +193,7 @@ print CFG "block: 1\n";
 print CFG "file:  /tmp/date.log\n";
 print CFG "rules: 13rules/\n";
 close(CFG);
+
 open(RULES, "> ./13rules");  close(RULES); chmod(0644, './13rules');
 my $o_13 = new Omnicheck($config_file);
 Omnicheck::File::register($o_13);
@@ -201,10 +202,48 @@ $o_13->go();
 unlink($config_file);
 unlink('./13rules');
 
-my $o_14 = new Omnicheck('./14config');
+$config_file = './14config';
+open(CFG, "> $config_file");
+print CFG "id: 14\n";
+print CFG "homedir: .\n";
+print CFG "\n";
+print CFG "block: 1\n";
+print CFG "file:  /tmp/date.log\n";
+print CFG "rules: 14rules/\n";
+close(CFG);
+
+open(RULES, "> ./14rules");
+print RULES "error\n";
+print RULES "file /tmp/error_file\n";
+print RULES "\n";
+print RULES ".*\n";
+print RULES "file /tmp/all\n";
+print RULES "\n";
+print RULES "a\n";
+print RULES "... b\n";
+print RULES "file /tmp/a_dot_b\n";
+print RULES "\n";
+print RULES "a\n";
+print RULES "&& b\n";
+print RULES "file /tmp/a_amp\n";
+print RULES "\n";
+print RULES "a\n";
+print RULES "|| b\n";
+print RULES "file /tmp/a_or_b\n";
+print RULES "\n";
+print RULES "a\n";
+print RULES "+3 b\n";
+print RULES "file /tmp/a_plus_b\n";
+close(RULES);
+
+my $o_14 = new Omnicheck($config_file);
 Omnicheck::File::register($o_14);
 Omnicheck::Ignore::register($o_14);
 $o_14->go();
+unlink($config_file);
+unlink('./14rules');
+unlink('./14.out');
+unlink('./14.err');
 
 my $o_15 = new Omnicheck('./15config');
 Omnicheck::File::register($o_15);
